@@ -213,82 +213,82 @@ python -m sglang.launch_server \
 
 In the nEmP scenario, you have **multiple encoder groups** and **multiple processor (prefill) servers**. Each incoming request specifies which bootstrap server to query for encoder discovery via the `epd_bootstrap_addr` field, allowing different requests on the same processor to use different sets of encoders.
 
+Each processor server co-locates a bootstrap server using `--encoder-bootstrap-port`, just like the nE1P case. Encoders register with the appropriate bootstrap on startup, and requests carry `epd_bootstrap_addr` to select which encoder group to use.
+
 **Architecture:**
 
 ```
-                      ┌──────────────┐
- Request A ──────────►│              │──► Bootstrap A ──► Encoders {E0, E1}
- (epd_bootstrap_addr  │  Processor 0 │
-  = bootstrap-a:8765) │              │
-                      └──────────────┘
-                      ┌──────────────┐
- Request B ──────────►│              │──► Bootstrap B ──► Encoders {E2, E3}
- (epd_bootstrap_addr  │  Processor 1 │
-  = bootstrap-b:8765) │              │
-                      └──────────────┘
+                      ┌──────────────────────────────────┐
+ Request A ──────────►│  Processor 0 (bootstrap on 8765) │──► Encoders {E0, E1}
+ (epd_bootstrap_addr  └──────────────────────────────────┘
+  = processor-0:8765)
+                      ┌──────────────────────────────────┐
+ Request B ──────────►│  Processor 1 (bootstrap on 8766) │──► Encoders {E2, E3}
+ (epd_bootstrap_addr  └──────────────────────────────────┘
+  = processor-1:8766)
 ```
 
-**Step 1: Start bootstrap servers** (one per encoder group, or a shared one):
+**Step 1: Start processor servers with co-located bootstrap servers:**
 
 ```bash
-# Bootstrap A — manages encoder group A
-python -c "
-from sglang.srt.disaggregation.encoder_bootstrap_server import EncoderBootstrapServer
-server = EncoderBootstrapServer(host='0.0.0.0', port=8765)
-import time; time.sleep(999999)
-" &
+# Processor 0 — with bootstrap server on port 8765
+python -m sglang.launch_server \
+  --model-path Qwen/Qwen3-VL-8B-Instruct \
+  --language-only \
+  --encoder-bootstrap-port 8765 \
+  --encoder-transfer-backend zmq_to_scheduler \
+  --port 30002
 
-# Bootstrap B — manages encoder group B
-python -c "
-from sglang.srt.disaggregation.encoder_bootstrap_server import EncoderBootstrapServer
-server = EncoderBootstrapServer(host='0.0.0.0', port=8766)
-import time; time.sleep(999999)
-" &
+# Processor 1 — with bootstrap server on port 8766
+python -m sglang.launch_server \
+  --model-path Qwen/Qwen3-VL-8B-Instruct \
+  --language-only \
+  --encoder-bootstrap-port 8766 \
+  --encoder-transfer-backend zmq_to_scheduler \
+  --port 30003
 ```
 
 **Step 2: Start encoders and register with their bootstrap servers:**
 
 ```bash
-# Encoder 0 (group A)
+# Encoder E0 (group A — registers with Processor 0's bootstrap)
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
-  --encoder-register-url http://bootstrap-a:8765 \
+  --encoder-register-url http://processor-0:8765 \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30000
 
-# Encoder 1 (group B)
+# Encoder E1 (group A — also registers with Processor 0's bootstrap)
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
-  --encoder-register-url http://bootstrap-b:8766 \
+  --encoder-register-url http://processor-0:8765 \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30001
-```
 
-**Step 3: Start processor servers** (no static encoder URLs needed):
-
-```bash
-# Processor 0
+# Encoder E2 (group B — registers with Processor 1's bootstrap)
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
-  --language-only \
+  --encoder-only \
+  --encoder-register-url http://processor-1:8766 \
   --encoder-transfer-backend zmq_to_scheduler \
-  --port 30002
+  --port 30004
 
-# Processor 1
+# Encoder E3 (group B — also registers with Processor 1's bootstrap)
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
-  --language-only \
+  --encoder-only \
+  --encoder-register-url http://processor-1:8766 \
   --encoder-transfer-backend zmq_to_scheduler \
-  --port 30003
+  --port 30005
 ```
 
-**Step 4: Send requests with `epd_bootstrap_addr`:**
+**Step 3: Send requests with `epd_bootstrap_addr`:**
 
 ```bash
 # Request to Processor 0, using encoder group A
-curl http://localhost:30002/v1/chat/completions \
+curl http://processor-0:30002/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "Qwen/Qwen3-VL-8B-Instruct",
@@ -296,11 +296,11 @@ curl http://localhost:30002/v1/chat/completions \
       {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}},
       {"type": "text", "text": "Describe this image"}
     ]}],
-    "epd_bootstrap_addr": "http://bootstrap-a:8765"
+    "epd_bootstrap_addr": "http://processor-0:8765"
   }'
 
 # Request to Processor 1, using encoder group B
-curl http://localhost:30003/v1/chat/completions \
+curl http://processor-1:30003/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "Qwen/Qwen3-VL-8B-Instruct",
@@ -308,11 +308,13 @@ curl http://localhost:30003/v1/chat/completions \
       {"type": "image_url", "image_url": {"url": "https://example.com/image2.jpg"}},
       {"type": "text", "text": "Describe this image"}
     ]}],
-    "epd_bootstrap_addr": "http://bootstrap-b:8766"
+    "epd_bootstrap_addr": "http://processor-1:8766"
   }'
 ```
 
 > **Note:** The `epd_bootstrap_addr` field can also be used with the `/generate` endpoint. When a request carries `epd_bootstrap_addr`, it overrides any server-level `--encoder-bootstrap-url` for that request only.
+>
+> **Tip:** If you prefer to run bootstrap servers on separate hosts (e.g. shared across processor instances), you can use `--encoder-bootstrap-url` to point processors to external bootstrap servers, as described in the [Dynamic Encoder Discovery](#dynamic-encoder-discovery-via-bootstrap-server) section above.
 
 #### gRPC Encoder (EPD)
 
