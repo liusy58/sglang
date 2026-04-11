@@ -3312,10 +3312,18 @@ class ServerArgs:
             and not self.encoder_bootstrap_url
             and not self.encoder_bootstrap_port
         ):
-            raise ValueError(
-                "requires at least one encoder urls to be set via --encoder-urls, "
-                "or a bootstrap URL via --encoder-bootstrap-url, "
-                "or start a local bootstrap server via --encoder-bootstrap-port"
+            # In nEmP mode, each request carries its own epd_bootstrap_addr
+            # to discover encoders dynamically.  Log a warning instead of
+            # raising so that users who rely on per-request bootstrap are
+            # not blocked.
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "--language-only is set but no encoder URLs, --encoder-bootstrap-url, "
+                "or --encoder-bootstrap-port were provided. Encoder discovery will "
+                "rely on per-request epd_bootstrap_addr (nEmP mode). If this is not "
+                "intended, set --encoder-urls, --encoder-bootstrap-url, or "
+                "--encoder-bootstrap-port."
             )
 
         # Eagerly compute encoder_bootstrap_url from encoder_bootstrap_port so that

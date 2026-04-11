@@ -209,6 +209,111 @@ python -m sglang.launch_server \
   --port 30002
 ```
 
+### nEmP: Multiple Encoders, Multiple Processors (Per-Request Bootstrap)
+
+In the nEmP scenario, you have **multiple encoder groups** and **multiple processor (prefill) servers**. Each incoming request specifies which bootstrap server to query for encoder discovery via the `epd_bootstrap_addr` field, allowing different requests on the same processor to use different sets of encoders.
+
+**Architecture:**
+
+```
+                      ┌──────────────┐
+ Request A ──────────►│              │──► Bootstrap A ──► Encoders {E0, E1}
+ (epd_bootstrap_addr  │  Processor 0 │
+  = bootstrap-a:8765) │              │
+                      └──────────────┘
+                      ┌──────────────┐
+ Request B ──────────►│              │──► Bootstrap B ──► Encoders {E2, E3}
+ (epd_bootstrap_addr  │  Processor 1 │
+  = bootstrap-b:8765) │              │
+                      └──────────────┘
+```
+
+**Step 1: Start bootstrap servers** (one per encoder group, or a shared one):
+
+```bash
+# Bootstrap A — manages encoder group A
+python -c "
+from sglang.srt.disaggregation.encoder_bootstrap_server import EncoderBootstrapServer
+server = EncoderBootstrapServer(host='0.0.0.0', port=8765)
+import time; time.sleep(999999)
+" &
+
+# Bootstrap B — manages encoder group B
+python -c "
+from sglang.srt.disaggregation.encoder_bootstrap_server import EncoderBootstrapServer
+server = EncoderBootstrapServer(host='0.0.0.0', port=8766)
+import time; time.sleep(999999)
+" &
+```
+
+**Step 2: Start encoders and register with their bootstrap servers:**
+
+```bash
+# Encoder 0 (group A)
+python -m sglang.launch_server \
+  --model-path Qwen/Qwen3-VL-8B-Instruct \
+  --encoder-only \
+  --encoder-register-url http://bootstrap-a:8765 \
+  --encoder-transfer-backend zmq_to_scheduler \
+  --port 30000
+
+# Encoder 1 (group B)
+python -m sglang.launch_server \
+  --model-path Qwen/Qwen3-VL-8B-Instruct \
+  --encoder-only \
+  --encoder-register-url http://bootstrap-b:8766 \
+  --encoder-transfer-backend zmq_to_scheduler \
+  --port 30001
+```
+
+**Step 3: Start processor servers** (no static encoder URLs needed):
+
+```bash
+# Processor 0
+python -m sglang.launch_server \
+  --model-path Qwen/Qwen3-VL-8B-Instruct \
+  --language-only \
+  --encoder-transfer-backend zmq_to_scheduler \
+  --port 30002
+
+# Processor 1
+python -m sglang.launch_server \
+  --model-path Qwen/Qwen3-VL-8B-Instruct \
+  --language-only \
+  --encoder-transfer-backend zmq_to_scheduler \
+  --port 30003
+```
+
+**Step 4: Send requests with `epd_bootstrap_addr`:**
+
+```bash
+# Request to Processor 0, using encoder group A
+curl http://localhost:30002/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-VL-8B-Instruct",
+    "messages": [{"role": "user", "content": [
+      {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}},
+      {"type": "text", "text": "Describe this image"}
+    ]}],
+    "epd_bootstrap_addr": "http://bootstrap-a:8765"
+  }'
+
+# Request to Processor 1, using encoder group B
+curl http://localhost:30003/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-VL-8B-Instruct",
+    "messages": [{"role": "user", "content": [
+      {"type": "image_url", "image_url": {"url": "https://example.com/image2.jpg"}},
+      {"type": "text", "text": "Describe this image"}
+    ]}],
+    "epd_bootstrap_addr": "http://bootstrap-b:8766"
+  }'
+```
+
+> **Note:** The `epd_bootstrap_addr` field can also be used with the `/generate` endpoint. When a request carries `epd_bootstrap_addr`, it overrides any server-level `--encoder-bootstrap-url` for that request only.
+
 #### gRPC Encoder (EPD)
 
 You can run the encoder as a gRPC server while keeping prefill/decode as HTTP.
