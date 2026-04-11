@@ -221,16 +221,21 @@ Each processor server co-locates a bootstrap server using `--encoder-bootstrap-p
                       ┌──────────────────────────────────┐
  Request A ──────────►│  Processor 0 (bootstrap on 8765) │──► Encoders {E0, E1}
  (epd_bootstrap_addr  └──────────────────────────────────┘
-  = processor-0:8765)
+  = <PROCESSOR_0>:8765)
                       ┌──────────────────────────────────┐
  Request B ──────────►│  Processor 1 (bootstrap on 8766) │──► Encoders {E2, E3}
  (epd_bootstrap_addr  └──────────────────────────────────┘
-  = processor-1:8766)
+  = <PROCESSOR_1>:8766)
 ```
 
 **Step 1: Start processor servers with co-located bootstrap servers:**
 
 ```bash
+# Replace with actual host IPs/names in multi-host deployments;
+# use 127.0.0.1 when testing on a single machine.
+PROCESSOR_0_HOST=127.0.0.1
+PROCESSOR_1_HOST=127.0.0.1   # use the second host's IP in production
+
 # Processor 0 — with bootstrap server on port 8765
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
@@ -255,7 +260,7 @@ python -m sglang.launch_server \
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
-  --encoder-register-url http://processor-0:8765 \
+  --encoder-register-url http://${PROCESSOR_0_HOST}:8765 \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30000
 
@@ -263,7 +268,7 @@ python -m sglang.launch_server \
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
-  --encoder-register-url http://processor-0:8765 \
+  --encoder-register-url http://${PROCESSOR_0_HOST}:8765 \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30001
 
@@ -271,7 +276,7 @@ python -m sglang.launch_server \
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
-  --encoder-register-url http://processor-1:8766 \
+  --encoder-register-url http://${PROCESSOR_1_HOST}:8766 \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30004
 
@@ -279,7 +284,7 @@ python -m sglang.launch_server \
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
-  --encoder-register-url http://processor-1:8766 \
+  --encoder-register-url http://${PROCESSOR_1_HOST}:8766 \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30005
 ```
@@ -288,7 +293,7 @@ python -m sglang.launch_server \
 
 ```bash
 # Request to Processor 0, using encoder group A
-curl http://processor-0:30002/v1/chat/completions \
+curl http://${PROCESSOR_0_HOST}:30002/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "Qwen/Qwen3-VL-8B-Instruct",
@@ -296,11 +301,11 @@ curl http://processor-0:30002/v1/chat/completions \
       {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}},
       {"type": "text", "text": "Describe this image"}
     ]}],
-    "epd_bootstrap_addr": "http://processor-0:8765"
+    "epd_bootstrap_addr": "http://'"${PROCESSOR_0_HOST}"':8765"
   }'
 
 # Request to Processor 1, using encoder group B
-curl http://processor-1:30003/v1/chat/completions \
+curl http://${PROCESSOR_1_HOST}:30003/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "Qwen/Qwen3-VL-8B-Instruct",
@@ -308,7 +313,7 @@ curl http://processor-1:30003/v1/chat/completions \
       {"type": "image_url", "image_url": {"url": "https://example.com/image2.jpg"}},
       {"type": "text", "text": "Describe this image"}
     ]}],
-    "epd_bootstrap_addr": "http://processor-1:8766"
+    "epd_bootstrap_addr": "http://'"${PROCESSOR_1_HOST}"':8766"
   }'
 ```
 
