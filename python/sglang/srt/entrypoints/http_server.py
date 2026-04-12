@@ -196,12 +196,6 @@ class _GlobalState:
 
 _global_state: Optional[_GlobalState] = None
 
-# In-process encoder URL registry for the embedded bootstrap server.
-# Protected by ``_encoder_registry_lock``; populated when ``--language-only``
-# is set and encoders call ``/register_encoder_url``.
-_encoder_registry: List[str] = []
-_encoder_registry_lock = threading.Lock()
-
 
 def set_global_state(global_state: _GlobalState):
     global _global_state
@@ -1100,18 +1094,19 @@ async def remote_instance_transfer_engine_info(rank: int = None):
 @auth_level(AuthLevel.ADMIN_OPTIONAL)
 async def register_encoder_url(data: dict):
     """Register an encoder URL (embedded bootstrap endpoint for --language-only)."""
+    registry = getattr(_global_state.tokenizer_manager, "encoder_url_registry", None)
+    if registry is None:
+        return ORJSONResponse(
+            {"error": {"message": "Encoder URL registry not available (--language-only not set)"}},
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
     url = data.get("url")
     if not url:
         return ORJSONResponse(
             {"error": {"message": "Missing or empty 'url' field in request body"}},
             status_code=HTTPStatus.BAD_REQUEST,
         )
-    with _encoder_registry_lock:
-        if url not in _encoder_registry:
-            _encoder_registry.append(url)
-            logger.info(f"Registered encoder URL: {url}")
-        else:
-            logger.debug(f"Encoder URL already registered: {url}")
+    registry.register(url)
     return PlainTextResponse("OK")
 
 
@@ -1119,16 +1114,19 @@ async def register_encoder_url(data: dict):
 @auth_level(AuthLevel.ADMIN_OPTIONAL)
 async def unregister_encoder_url(data: dict):
     """Unregister an encoder URL (embedded bootstrap endpoint for --language-only)."""
+    registry = getattr(_global_state.tokenizer_manager, "encoder_url_registry", None)
+    if registry is None:
+        return ORJSONResponse(
+            {"error": {"message": "Encoder URL registry not available (--language-only not set)"}},
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
     url = data.get("url")
     if not url:
         return ORJSONResponse(
             {"error": {"message": "Missing or empty 'url' field in request body"}},
             status_code=HTTPStatus.BAD_REQUEST,
         )
-    with _encoder_registry_lock:
-        if url in _encoder_registry:
-            _encoder_registry.remove(url)
-            logger.info(f"Unregistered encoder URL: {url}")
+    registry.unregister(url)
     return PlainTextResponse("OK")
 
 
@@ -1136,9 +1134,10 @@ async def unregister_encoder_url(data: dict):
 @auth_level(AuthLevel.ADMIN_OPTIONAL)
 async def list_encoder_urls():
     """List encoder URLs from the embedded bootstrap registry."""
-    with _encoder_registry_lock:
-        urls = list(_encoder_registry)
-    return {"encoder_urls": urls}
+    registry = getattr(_global_state.tokenizer_manager, "encoder_url_registry", None)
+    if registry is None:
+        return {"encoder_urls": []}
+    return {"encoder_urls": registry.list_urls()}
 
 
 @app.post("/init_weights_update_group")

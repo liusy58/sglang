@@ -438,7 +438,13 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerScoreMixin):
         self.bootstrap_server = start_disagg_service(self.server_args)
 
         # Encoder Disaggregation
+        self.encoder_url_registry = None
         if self.server_args.language_only:
+            from sglang.srt.disaggregation.encoder_bootstrap_server import (
+                EncoderURLRegistry,
+            )
+
+            self.encoder_url_registry = EncoderURLRegistry()
             self.mm_receiver = create_mm_receiver(
                 self.server_args,
                 dtype=self.model_config.dtype,
