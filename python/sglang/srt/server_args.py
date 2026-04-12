@@ -709,7 +709,6 @@ class ServerArgs:
     language_only: bool = False
     encoder_transfer_backend: str = ENCODER_TRANSFER_BACKEND_CHOICES[0]
     encoder_urls: List[str] = dataclasses.field(default_factory=list)
-    encoder_bootstrap_port: Optional[int] = None
     encoder_bootstrap_url: Optional[str] = None
     encoder_register_url: Optional[str] = None
     enable_adaptive_dispatch_to_encoder: bool = False
@@ -3310,7 +3309,6 @@ class ServerArgs:
             self.language_only
             and len(self.encoder_urls) == 0
             and not self.encoder_bootstrap_url
-            and not self.encoder_bootstrap_port
         ):
             # In nEmP mode, each request carries its own epd_bootstrap_addr
             # to discover encoders dynamically.  Log a warning instead of
@@ -3319,22 +3317,11 @@ class ServerArgs:
             import logging as _logging
 
             _logging.getLogger(__name__).warning(
-                "--language-only is set but no encoder URLs, --encoder-bootstrap-url, "
-                "or --encoder-bootstrap-port were provided. Encoder discovery will "
+                "--language-only is set but no encoder URLs or --encoder-bootstrap-url "
+                "were provided. Encoder discovery will "
                 "rely on per-request epd_bootstrap_addr (nEmP mode). If this is not "
-                "intended, set --encoder-urls, --encoder-bootstrap-url, or "
-                "--encoder-bootstrap-port."
+                "intended, set --encoder-urls or --encoder-bootstrap-url."
             )
-
-        # Eagerly compute encoder_bootstrap_url from encoder_bootstrap_port so that
-        # sub-processes (e.g. the scheduler) inherit the correct URL in their copy
-        # of server_args.  This must happen before any subprocess is spawned.
-        if (
-            self.language_only
-            and self.encoder_bootstrap_port
-            and not self.encoder_bootstrap_url
-        ):
-            self.encoder_bootstrap_url = self.url(port=self.encoder_bootstrap_port)
 
         # Validate IB devices when mooncake backend is used
         if (
@@ -5883,14 +5870,6 @@ class ServerArgs:
             type=str,
             default=[],
             help="List of encoder server urls.",
-        )
-        parser.add_argument(
-            "--encoder-bootstrap-port",
-            type=int,
-            default=ServerArgs.encoder_bootstrap_port,
-            help="Port to start the encoder bootstrap server on (language-only/prefill side). "
-            "When set, a dedicated EncoderBootstrapServer is started to allow encoders to "
-            "register dynamically. Encoders use --encoder-register-url to register with it.",
         )
         parser.add_argument(
             "--encoder-bootstrap-url",
