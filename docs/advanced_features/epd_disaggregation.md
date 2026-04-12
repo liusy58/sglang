@@ -24,14 +24,14 @@ Example:
 
 ```bash
 # encoder
-python -m sglang.launch_server \
+sglang serve \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
   --encoder-transfer-backend mooncake \
   --port 30000
 
 # language-only server
-python -m sglang.launch_server \
+sglang serve \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --language-only \
   --encoder-urls http://127.0.0.1:30000 \
@@ -70,14 +70,14 @@ export MOONCAKE_PROTOCOL="rdma"
 export MOONCAKE_GLOBAL_SEGMENT_SIZE="4gb"
 
 # encoder with global multimodal cache enabled
-python -m sglang.launch_server \
+sglang serve \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
   --enable-mm-global-cache \
   --port 30000
 
 # language-only server
-python -m sglang.launch_server \
+sglang serve \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --language-only \
   --encoder-urls http://127.0.0.1:30000 \
@@ -97,19 +97,19 @@ Notes:
 
 ```bash
 # encoder 0
-python -m sglang.launch_server \
+sglang serve \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30000
 # encoder 1
-python -m sglang.launch_server \
+sglang serve \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30001
 # language-only server
-python -m sglang.launch_server \
+sglang serve \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --language-only \
   --encoder-urls http://127.0.0.1:30000 http://127.0.0.1:30001 \
@@ -121,19 +121,19 @@ python -m sglang.launch_server \
 
 ```bash
 # encoder 0
-python -m sglang.launch_server \
+sglang serve \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30000
 # encoder 1
-python -m sglang.launch_server \
+sglang serve \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30001
 # prefill 0
-python -m sglang.launch_server \
+sglang serve \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --disaggregation-mode prefill \
   --language-only \
@@ -141,7 +141,7 @@ python -m sglang.launch_server \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30002
 # decode 0
-python -m sglang.launch_server \
+sglang serve \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --disaggregation-mode decode \
   --port 30003
@@ -162,7 +162,7 @@ When a language-only server starts, it automatically embeds bootstrap endpoints 
 
 ```bash
 # Step 1: Start the language-only prefill server (bootstrap is embedded automatically)
-python -m sglang.launch_server \
+sglang serve \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --language-only \
   --encoder-transfer-backend zmq_to_scheduler \
@@ -170,7 +170,7 @@ python -m sglang.launch_server \
 
 # Step 2: Start encoders — they self-register with the prefill server
 # Encoder 0
-python -m sglang.launch_server \
+sglang serve \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
   --encoder-register-urls http://127.0.0.1:30002 \
@@ -178,7 +178,7 @@ python -m sglang.launch_server \
   --port 30000
 
 # Encoder 1 (can be added later without restarting the prefill server)
-python -m sglang.launch_server \
+sglang serve \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
   --encoder-register-urls http://127.0.0.1:30002 \
@@ -221,14 +221,14 @@ PREFILL_0_HOST=127.0.0.1
 PREFILL_1_HOST=127.0.0.1   # use the second host's IP in production
 
 # Prefill 0
-python -m sglang.launch_server \
+sglang serve \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --language-only \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30002
 
 # Prefill 1
-python -m sglang.launch_server \
+sglang serve \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --language-only \
   --encoder-transfer-backend zmq_to_scheduler \
@@ -241,7 +241,7 @@ An encoder can register with a single prefill server, or with **multiple** prefi
 
 ```bash
 # Encoder E0 (group A — registers with Prefill 0 only)
-python -m sglang.launch_server \
+sglang serve \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
   --encoder-register-urls http://${PREFILL_0_HOST}:30002 \
@@ -249,7 +249,7 @@ python -m sglang.launch_server \
   --port 30000
 
 # Encoder E1 (registers with BOTH Prefill 0 and Prefill 1)
-python -m sglang.launch_server \
+sglang serve \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
   --encoder-register-urls http://${PREFILL_0_HOST}:30002 http://${PREFILL_1_HOST}:30003 \
@@ -257,7 +257,7 @@ python -m sglang.launch_server \
   --port 30001
 
 # Encoder E2 (group B — registers with Prefill 1 only)
-python -m sglang.launch_server \
+sglang serve \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
   --encoder-register-urls http://${PREFILL_1_HOST}:30003 \
@@ -265,7 +265,7 @@ python -m sglang.launch_server \
   --port 30004
 
 # Encoder E3 (group B — also registers with Prefill 1)
-python -m sglang.launch_server \
+sglang serve \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
   --encoder-register-urls http://${PREFILL_1_HOST}:30003 \
@@ -312,7 +312,7 @@ prefill process so it uses the gRPC receiver.
 
 ```bash
 # gRPC encoder
-python -m sglang.launch_server \
+sglang serve \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
   --grpc-mode \
@@ -321,7 +321,7 @@ python -m sglang.launch_server \
 
 # prefill (HTTP) - tell it to use gRPC receiver
 SGLANG_ENCODER_MM_RECEIVER_MODE=grpc \
-python -m sglang.launch_server \
+sglang serve \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --disaggregation-mode prefill \
   --language-only \
@@ -330,7 +330,7 @@ python -m sglang.launch_server \
   --port 30002
 
 # decode (HTTP)
-python -m sglang.launch_server \
+sglang serve \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --disaggregation-mode decode \
   --port 30003
