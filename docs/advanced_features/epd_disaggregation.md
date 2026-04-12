@@ -209,34 +209,34 @@ python -m sglang.launch_server \
   --port 30002
 ```
 
-### nEmP: Multiple Encoders, Multiple Processors (Per-Request Bootstrap)
+### nEmP: Multiple Encoders, Multiple Prefill Servers (Per-Request Bootstrap)
 
-In the nEmP scenario, you have **multiple encoder groups** and **multiple processor (prefill) servers**. Each incoming request specifies which bootstrap server to query for encoder discovery via the `epd_bootstrap_addr` field, allowing different requests on the same processor to use different sets of encoders.
+In the nEmP scenario, you have **multiple encoder groups** and **multiple prefill servers**. Each incoming request specifies which bootstrap server to query for encoder discovery via the `epd_bootstrap_addr` field, allowing different requests on the same prefill server to use different sets of encoders.
 
-Each processor server co-locates a bootstrap server using `--encoder-bootstrap-port`, just like the nE1P case. Encoders register with the appropriate bootstrap on startup, and requests carry `epd_bootstrap_addr` to select which encoder group to use.
+Each prefill server co-locates a bootstrap server using `--encoder-bootstrap-port`, just like the nE1P case. Encoders register with the appropriate bootstrap on startup, and requests carry `epd_bootstrap_addr` to select which encoder group to use.
 
 **Architecture:**
 
 ```
                       ┌──────────────────────────────────┐
- Request A ──────────►│  Processor 0 (bootstrap on 8765) │──► Encoders {E0, E1}
+ Request A ──────────►│  Prefill 0 (bootstrap on 8765)   │──► Encoders {E0, E1}
  (epd_bootstrap_addr  └──────────────────────────────────┘
-  = <PROCESSOR_0>:8765)
+  = <PREFILL_0>:8765)
                       ┌──────────────────────────────────┐
- Request B ──────────►│  Processor 1 (bootstrap on 8766) │──► Encoders {E2, E3}
+ Request B ──────────►│  Prefill 1 (bootstrap on 8766)   │──► Encoders {E2, E3}
  (epd_bootstrap_addr  └──────────────────────────────────┘
-  = <PROCESSOR_1>:8766)
+  = <PREFILL_1>:8766)
 ```
 
-**Step 1: Start processor servers with co-located bootstrap servers:**
+**Step 1: Start prefill servers with co-located bootstrap servers:**
 
 ```bash
 # Replace with actual host IPs/names in multi-host deployments;
 # use 127.0.0.1 when testing on a single machine.
-PROCESSOR_0_HOST=127.0.0.1
-PROCESSOR_1_HOST=127.0.0.1   # use the second host's IP in production
+PREFILL_0_HOST=127.0.0.1
+PREFILL_1_HOST=127.0.0.1   # use the second host's IP in production
 
-# Processor 0 — with bootstrap server on port 8765
+# Prefill 0 — with bootstrap server on port 8765
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --language-only \
@@ -244,7 +244,7 @@ python -m sglang.launch_server \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30002
 
-# Processor 1 — with bootstrap server on port 8766
+# Prefill 1 — with bootstrap server on port 8766
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --language-only \
@@ -256,35 +256,35 @@ python -m sglang.launch_server \
 **Step 2: Start encoders and register with their bootstrap servers:**
 
 ```bash
-# Encoder E0 (group A — registers with Processor 0's bootstrap)
+# Encoder E0 (group A — registers with Prefill 0's bootstrap)
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
-  --encoder-register-url http://${PROCESSOR_0_HOST}:8765 \
+  --encoder-register-url http://${PREFILL_0_HOST}:8765 \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30000
 
-# Encoder E1 (group A — also registers with Processor 0's bootstrap)
+# Encoder E1 (group A — also registers with Prefill 0's bootstrap)
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
-  --encoder-register-url http://${PROCESSOR_0_HOST}:8765 \
+  --encoder-register-url http://${PREFILL_0_HOST}:8765 \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30001
 
-# Encoder E2 (group B — registers with Processor 1's bootstrap)
+# Encoder E2 (group B — registers with Prefill 1's bootstrap)
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
-  --encoder-register-url http://${PROCESSOR_1_HOST}:8766 \
+  --encoder-register-url http://${PREFILL_1_HOST}:8766 \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30004
 
-# Encoder E3 (group B — also registers with Processor 1's bootstrap)
+# Encoder E3 (group B — also registers with Prefill 1's bootstrap)
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
-  --encoder-register-url http://${PROCESSOR_1_HOST}:8766 \
+  --encoder-register-url http://${PREFILL_1_HOST}:8766 \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30005
 ```
@@ -292,8 +292,8 @@ python -m sglang.launch_server \
 **Step 3: Send requests with `epd_bootstrap_addr`:**
 
 ```bash
-# Request to Processor 0, using encoder group A
-curl http://${PROCESSOR_0_HOST}:30002/v1/chat/completions \
+# Request to Prefill 0, using encoder group A
+curl http://${PREFILL_0_HOST}:30002/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "Qwen/Qwen3-VL-8B-Instruct",
@@ -301,11 +301,11 @@ curl http://${PROCESSOR_0_HOST}:30002/v1/chat/completions \
       {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}},
       {"type": "text", "text": "Describe this image"}
     ]}],
-    "epd_bootstrap_addr": "http://'"${PROCESSOR_0_HOST}"':8765"
+    "epd_bootstrap_addr": "http://'"${PREFILL_0_HOST}"':8765"
   }'
 
-# Request to Processor 1, using encoder group B
-curl http://${PROCESSOR_1_HOST}:30003/v1/chat/completions \
+# Request to Prefill 1, using encoder group B
+curl http://${PREFILL_1_HOST}:30003/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "Qwen/Qwen3-VL-8B-Instruct",
@@ -313,13 +313,13 @@ curl http://${PROCESSOR_1_HOST}:30003/v1/chat/completions \
       {"type": "image_url", "image_url": {"url": "https://example.com/image2.jpg"}},
       {"type": "text", "text": "Describe this image"}
     ]}],
-    "epd_bootstrap_addr": "http://'"${PROCESSOR_1_HOST}"':8766"
+    "epd_bootstrap_addr": "http://'"${PREFILL_1_HOST}"':8766"
   }'
 ```
 
 > **Note:** The `epd_bootstrap_addr` field can also be used with the `/generate` endpoint. When a request carries `epd_bootstrap_addr`, it overrides any server-level `--encoder-bootstrap-url` for that request only.
 >
-> **Tip:** If you prefer to run bootstrap servers on separate hosts (e.g. shared across processor instances), you can use `--encoder-bootstrap-url` to point processors to external bootstrap servers, as described in the [Dynamic Encoder Discovery](#dynamic-encoder-discovery-via-bootstrap-server) section above.
+> **Tip:** If you prefer to run bootstrap servers on separate hosts (e.g. shared across prefill instances), you can use `--encoder-bootstrap-url` to point prefill servers to external bootstrap servers, as described in the [Dynamic Encoder Discovery](#dynamic-encoder-discovery-via-bootstrap-server) section above.
 
 #### gRPC Encoder (EPD)
 

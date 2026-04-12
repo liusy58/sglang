@@ -239,7 +239,7 @@ class GenerateReqInput(BaseReq):
     need_wait_for_mm_inputs: Optional[bool] = None
     num_items_assigned: Optional[Dict[Modality, List[int]]] = None
     # Per-request encoder bootstrap address for nEmP (multiple encoders,
-    # multiple processors).  When set, this overrides the server-level
+    # multiple prefill servers).  When set, this overrides the server-level
     # encoder_bootstrap_url so each request can target a different bootstrap
     # server to discover its own set of encoders.
     epd_bootstrap_addr: Optional[str] = None
