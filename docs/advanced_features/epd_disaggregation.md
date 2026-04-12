@@ -158,27 +158,22 @@ python -m sglang_router.launch_router \
 
 Instead of statically listing encoder URLs via `--encoder-urls`, you can have encoders register themselves at runtime. This is useful when encoders start after the prefill server, or when you need to add/replace encoders without restarting the prefill server.
 
-First, start an `EncoderBootstrapServer` (a standalone process or any service that implements the same REST API). Then point the prefill server at it with `--encoder-bootstrap-url`, and have encoder servers register via `--encoder-register-url`.
+When a language-only server starts, it automatically embeds bootstrap endpoints (`/register_encoder_url`, `/unregister_encoder_url`, `/list_encoder_urls`) in its HTTP server. Encoder servers use `--encoder-register-url` pointing to the prefill server to register on startup.
 
 ```bash
-# Step 1: Start the bootstrap server (standalone)
-python -m sglang.srt.disaggregation.encoder_bootstrap_server \
-  --host 127.0.0.1 --port 8765
-
-# Step 2: Start the language-only prefill server pointing to the bootstrap
+# Step 1: Start the language-only prefill server (bootstrap is embedded automatically)
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --language-only \
-  --encoder-bootstrap-url http://127.0.0.1:8765 \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30002
 
-# Step 3: Start encoders — they self-register with the bootstrap server
+# Step 2: Start encoders — they self-register with the prefill server
 # Encoder 0
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
-  --encoder-register-url http://127.0.0.1:8765 \
+  --encoder-register-url http://127.0.0.1:30002 \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30000
 
@@ -186,7 +181,7 @@ python -m sglang.launch_server \
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
-  --encoder-register-url http://127.0.0.1:8765 \
+  --encoder-register-url http://127.0.0.1:30002 \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30001
 ```
@@ -200,51 +195,35 @@ curl http://127.0.0.1:30002/list_encoder_urls
 
 ### nEmP: Multiple Encoders, Multiple Prefill Servers (Per-Request Bootstrap)
 
-In the nEmP scenario, you have **multiple encoder groups** and **multiple prefill servers**. Each incoming request specifies which bootstrap server to query for encoder discovery via the `epd_bootstrap_addr` field, allowing different requests on the same prefill server to use different sets of encoders.
+In the nEmP scenario, you have **multiple encoder groups** and **multiple prefill servers**. Each incoming request specifies which prefill server to query for encoder discovery via the `epd_bootstrap_addr` field, allowing different requests on the same prefill server to use different sets of encoders.
 
-Each encoder group has its own standalone bootstrap server. Prefill servers use `--encoder-bootstrap-url` to point at their default bootstrap (for nE1P-style fallback), while requests carry `epd_bootstrap_addr` to select which encoder group to use.
+Each prefill server embeds bootstrap endpoints automatically when `--language-only` is set. Encoders register with their respective prefill server, and requests carry `epd_bootstrap_addr` to select which prefill server's encoder group to use.
 
 **Architecture:**
 
 ```
                       ┌──────────────────────────────────┐
- Request A ──────────►│  Prefill 0                       │──► Encoders {E0, E1}
+ Request A ──────────►│  Prefill 0 (port 30002)          │──► Encoders {E0, E1}
  (epd_bootstrap_addr  └──────────────────────────────────┘
-  = <BOOTSTRAP_0>:8765)        ▲ bootstrap 0
+  = <PREFILL_0>:30002)
                       ┌──────────────────────────────────┐
- Request B ──────────►│  Prefill 1                       │──► Encoders {E2, E3}
+ Request B ──────────►│  Prefill 1 (port 30003)          │──► Encoders {E2, E3}
  (epd_bootstrap_addr  └──────────────────────────────────┘
-  = <BOOTSTRAP_1>:8766)        ▲ bootstrap 1
+  = <PREFILL_1>:30003)
 ```
 
-**Step 1: Start bootstrap servers:**
+**Step 1: Start prefill servers (bootstrap is embedded):**
 
 ```bash
 # Replace with actual host IPs/names in multi-host deployments;
 # use 127.0.0.1 when testing on a single machine.
-BOOTSTRAP_0_HOST=127.0.0.1
-BOOTSTRAP_1_HOST=127.0.0.1   # use the second host's IP in production
-
-# Bootstrap 0 — for encoder group A
-python -m sglang.srt.disaggregation.encoder_bootstrap_server \
-  --host ${BOOTSTRAP_0_HOST} --port 8765
-
-# Bootstrap 1 — for encoder group B
-python -m sglang.srt.disaggregation.encoder_bootstrap_server \
-  --host ${BOOTSTRAP_1_HOST} --port 8766
-```
-
-**Step 2: Start prefill servers:**
-
-```bash
 PREFILL_0_HOST=127.0.0.1
-PREFILL_1_HOST=127.0.0.1
+PREFILL_1_HOST=127.0.0.1   # use the second host's IP in production
 
 # Prefill 0
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --language-only \
-  --encoder-bootstrap-url http://${BOOTSTRAP_0_HOST}:8765 \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30002
 
@@ -252,48 +231,47 @@ python -m sglang.launch_server \
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --language-only \
-  --encoder-bootstrap-url http://${BOOTSTRAP_1_HOST}:8766 \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30003
 ```
 
-**Step 3: Start encoders and register with their bootstrap servers:**
+**Step 2: Start encoders and register with their prefill servers:**
 
 ```bash
-# Encoder E0 (group A — registers with bootstrap 0)
+# Encoder E0 (group A — registers with Prefill 0)
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
-  --encoder-register-url http://${BOOTSTRAP_0_HOST}:8765 \
+  --encoder-register-url http://${PREFILL_0_HOST}:30002 \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30000
 
-# Encoder E1 (group A — also registers with bootstrap 0)
+# Encoder E1 (group A — also registers with Prefill 0)
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
-  --encoder-register-url http://${BOOTSTRAP_0_HOST}:8765 \
+  --encoder-register-url http://${PREFILL_0_HOST}:30002 \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30001
 
-# Encoder E2 (group B — registers with bootstrap 1)
+# Encoder E2 (group B — registers with Prefill 1)
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
-  --encoder-register-url http://${BOOTSTRAP_1_HOST}:8766 \
+  --encoder-register-url http://${PREFILL_1_HOST}:30003 \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30004
 
-# Encoder E3 (group B — also registers with bootstrap 1)
+# Encoder E3 (group B — also registers with Prefill 1)
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-8B-Instruct \
   --encoder-only \
-  --encoder-register-url http://${BOOTSTRAP_1_HOST}:8766 \
+  --encoder-register-url http://${PREFILL_1_HOST}:30003 \
   --encoder-transfer-backend zmq_to_scheduler \
   --port 30005
 ```
 
-**Step 4: Send requests with `epd_bootstrap_addr`:**
+**Step 3: Send requests with `epd_bootstrap_addr`:**
 
 ```bash
 # Request to Prefill 0, using encoder group A
@@ -305,7 +283,7 @@ curl http://${PREFILL_0_HOST}:30002/v1/chat/completions \
       {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}},
       {"type": "text", "text": "Describe this image"}
     ]}],
-    "epd_bootstrap_addr": "http://'"${BOOTSTRAP_0_HOST}"':8765"
+    "epd_bootstrap_addr": "http://'"${PREFILL_0_HOST}"':30002"
   }'
 
 # Request to Prefill 1, using encoder group B
@@ -317,7 +295,7 @@ curl http://${PREFILL_1_HOST}:30003/v1/chat/completions \
       {"type": "image_url", "image_url": {"url": "https://example.com/image2.jpg"}},
       {"type": "text", "text": "Describe this image"}
     ]}],
-    "epd_bootstrap_addr": "http://'"${BOOTSTRAP_1_HOST}"':8766"
+    "epd_bootstrap_addr": "http://'"${PREFILL_1_HOST}"':30003"
   }'
 ```
 

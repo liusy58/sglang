@@ -57,7 +57,7 @@ from fastapi import (
 )
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import ORJSONResponse, Response, StreamingResponse
+from fastapi.responses import ORJSONResponse, PlainTextResponse, Response, StreamingResponse
 
 from sglang.srt.constants import HEALTH_CHECK_RID_PREFIX
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST, DisaggregationMode
@@ -195,6 +195,12 @@ class _GlobalState:
 
 
 _global_state: Optional[_GlobalState] = None
+
+# In-process encoder URL registry for the embedded bootstrap server.
+# Protected by ``_encoder_registry_lock``; populated when ``--language-only``
+# is set and encoders call ``/register_encoder_url``.
+_encoder_registry: List[str] = []
+_encoder_registry_lock = threading.Lock()
 
 
 def set_global_state(global_state: _GlobalState):
@@ -1090,44 +1096,49 @@ async def remote_instance_transfer_engine_info(rank: int = None):
     )
 
 
+@app.post("/register_encoder_url")
+@auth_level(AuthLevel.ADMIN_OPTIONAL)
+async def register_encoder_url(data: dict):
+    """Register an encoder URL (embedded bootstrap endpoint for --language-only)."""
+    url = data.get("url")
+    if not url:
+        return ORJSONResponse(
+            {"error": {"message": "Missing or empty 'url' field in request body"}},
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
+    with _encoder_registry_lock:
+        if url not in _encoder_registry:
+            _encoder_registry.append(url)
+            logger.info(f"Registered encoder URL: {url}")
+        else:
+            logger.debug(f"Encoder URL already registered: {url}")
+    return PlainTextResponse("OK")
+
+
+@app.delete("/unregister_encoder_url")
+@auth_level(AuthLevel.ADMIN_OPTIONAL)
+async def unregister_encoder_url(data: dict):
+    """Unregister an encoder URL (embedded bootstrap endpoint for --language-only)."""
+    url = data.get("url")
+    if not url:
+        return ORJSONResponse(
+            {"error": {"message": "Missing or empty 'url' field in request body"}},
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
+    with _encoder_registry_lock:
+        if url in _encoder_registry:
+            _encoder_registry.remove(url)
+            logger.info(f"Unregistered encoder URL: {url}")
+    return PlainTextResponse("OK")
+
+
 @app.get("/list_encoder_urls")
 @auth_level(AuthLevel.ADMIN_OPTIONAL)
 async def list_encoder_urls():
-    """List encoder URLs registered with the bootstrap server."""
-    server_args = _global_state.tokenizer_manager.server_args
-    if not server_args.encoder_bootstrap_url:
-        return ORJSONResponse(
-            {"error": {"message": "No encoder_bootstrap_url configured"}},
-            status_code=HTTPStatus.BAD_REQUEST,
-        )
-
-    try:
-        resp = requests.get(
-            f"{server_args.encoder_bootstrap_url}/list_encoder_urls",
-            timeout=5,
-        )
-        if resp.status_code == 200:
-            return resp.json()
-        logger.warning(
-            f"Bootstrap server returned non-200 status {resp.status_code} "
-            f"when listing encoder URLs"
-        )
-        return ORJSONResponse(
-            {
-                "error": {
-                    "message": f"Bootstrap server returned status {resp.status_code}"
-                }
-            },
-            status_code=HTTPStatus.BAD_REQUEST,
-        )
-    except (requests.exceptions.RequestException, ValueError) as e:
-        logger.warning(
-            f"Failed to connect to bootstrap server to list encoder URLs: {e}"
-        )
-        return ORJSONResponse(
-            {"error": {"message": f"Failed to connect to bootstrap server: {e}"}},
-            status_code=HTTPStatus.BAD_REQUEST,
-        )
+    """List encoder URLs from the embedded bootstrap registry."""
+    with _encoder_registry_lock:
+        urls = list(_encoder_registry)
+    return {"encoder_urls": urls}
 
 
 @app.post("/init_weights_update_group")

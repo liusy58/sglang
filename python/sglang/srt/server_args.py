@@ -3323,6 +3323,13 @@ class ServerArgs:
                 "intended, set --encoder-urls or --encoder-bootstrap-url."
             )
 
+        # When --language-only is set the main HTTP server embeds the bootstrap
+        # endpoints (register / unregister / list).  Auto-set encoder_bootstrap_url
+        # to point at ourselves so that encode_receiver discovers encoders via
+        # the same server without requiring a separate bootstrap process.
+        if self.language_only and not self.encoder_bootstrap_url:
+            self.encoder_bootstrap_url = self.url()
+
         # Validate IB devices when mooncake backend is used
         if (
             self.disaggregation_transfer_backend == "mooncake"
