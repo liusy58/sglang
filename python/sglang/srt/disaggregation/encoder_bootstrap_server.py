@@ -137,7 +137,15 @@ def main():
     logging.basicConfig(level=logging.INFO)
     server = EncoderBootstrapServer(host=args.host, port=args.port)
 
-    # Block until interrupted.
+    # Graceful shutdown on SIGTERM / SIGINT.
+    def _shutdown(signum, frame):
+        server.close()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
+    # Block until a signal arrives.
     try:
         signal.pause()
     except AttributeError:
