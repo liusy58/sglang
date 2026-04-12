@@ -709,6 +709,7 @@ class ServerArgs:
     language_only: bool = False
     encoder_transfer_backend: str = ENCODER_TRANSFER_BACKEND_CHOICES[0]
     encoder_urls: List[str] = dataclasses.field(default_factory=list)
+    # Auto-populated to self.url() when --language-only is set.  Not a CLI arg.
     encoder_bootstrap_url: Optional[str] = None
     encoder_register_urls: List[str] = dataclasses.field(default_factory=list)
     enable_adaptive_dispatch_to_encoder: bool = False
