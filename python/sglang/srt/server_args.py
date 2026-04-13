@@ -6044,6 +6044,12 @@ class ServerArgs:
         args.dp_size = args.data_parallel_size
         args.ep_size = args.expert_parallel_size
 
+        # encoder_bootstrap_url is auto-derived (not a CLI arg), so it won't
+        # be in the argparse namespace.  Set it to its default so the generic
+        # getattr below doesn't raise AttributeError.
+        if not hasattr(args, "encoder_bootstrap_url"):
+            args.encoder_bootstrap_url = None
+
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         return cls(**{attr: getattr(args, attr) for attr in attrs})
 
