@@ -209,8 +209,8 @@ This is an approximate recipe for adventurous users. It **will not** work out of
 uv venv --python=3.14t venv-sglang
 source venv-sglang/bin/activate
 
-# Install PyTorch (preview wheels)
-uv pip install torch torchaudio torchvision --torch-backend cpu
+# Install PyTorch CPU-only (preview wheels)
+uv pip install torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cpu
 
 # Install dependencies that have cp314t wheels
 uv pip install numpy scipy aiohttp msgspec xgrammar llguidance orjson pyzmq pillow pydantic
