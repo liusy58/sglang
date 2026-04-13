@@ -448,6 +448,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerScoreMixin):
             self.mm_receiver = create_mm_receiver(
                 self.server_args,
                 dtype=self.model_config.dtype,
+                encoder_url_registry=self.encoder_url_registry,
             )
 
     def init_metric_collector_watchdog(self):

@@ -604,11 +604,17 @@ class MMReceiverBase(ABC):
         tp_rank: Optional[int] = None,
         tp_group: Optional[GroupCoordinator] = None,
         scheduler: Optional["Scheduler"] = None,
+        encoder_url_registry=None,
     ):
         self.context = zmq.asyncio.Context(20)
         self.encoder_transfer_backend = server_args.encoder_transfer_backend
         self.encode_urls = list(server_args.encoder_urls)
         self.encoder_bootstrap_url = server_args.encoder_bootstrap_url
+        # Local registry for short-circuiting self-referential bootstrap calls.
+        # When the bootstrap URL points to the same server, using a synchronous
+        # HTTP call would deadlock the event loop.  The registry allows us to
+        # query encoder URLs directly in-process.
+        self._encoder_url_registry = encoder_url_registry
         # Timestamp of last bootstrap refresh; used to rate-limit requests.
         self._last_bootstrap_refresh: float = 0.0
         self._bootstrap_refresh_interval: float = 5.0
@@ -717,6 +723,35 @@ class MMReceiverBase(ABC):
         url = bootstrap_url or self.encoder_bootstrap_url
         if not url:
             return None
+
+        # Short-circuit: when the bootstrap URL points to this server and we
+        # have a local registry, query it directly to avoid a synchronous HTTP
+        # call that would deadlock the event loop.
+        if self._encoder_url_registry is not None and url.rstrip(
+            "/"
+        ) == (self.encoder_bootstrap_url or "").rstrip("/"):
+            urls = self._encoder_url_registry.list_urls()
+            if bootstrap_url is not None:
+                # Per-request path: return directly.
+                if urls:
+                    logger.info(
+                        f"Fetched {len(urls)} encoder URLs from local registry "
+                        f"(bootstrap {bootstrap_url} is self): {urls}"
+                    )
+                return urls
+            else:
+                # Server-level path: cache on self.
+                self.encode_urls = urls
+                if urls:
+                    logger.info(
+                        f"Fetched {len(urls)} encoder URLs from local registry: {urls}"
+                    )
+                else:
+                    logger.info(
+                        "Local registry has no encoder URLs yet; "
+                        "will retry on next request"
+                    )
+                return None
 
         # Per-request bootstrap: always fetch, return directly.
         if bootstrap_url is not None:
@@ -1219,6 +1254,7 @@ class MMReceiverHTTP(MMReceiverBase):
         tp_rank: Optional[int] = None,
         tp_group: Optional[GroupCoordinator] = None,
         scheduler: Optional["Scheduler"] = None,
+        encoder_url_registry=None,
     ):
         super().__init__(
             server_args,
@@ -1228,6 +1264,7 @@ class MMReceiverHTTP(MMReceiverBase):
             tp_rank=tp_rank,
             tp_group=tp_group,
             scheduler=scheduler,
+            encoder_url_registry=encoder_url_registry,
         )
 
     # For zmq_to_scheduler
@@ -1381,6 +1418,7 @@ class MMReceiverGrpc(MMReceiverBase):
         tp_rank: Optional[int] = None,
         tp_group: Optional[GroupCoordinator] = None,
         scheduler: Optional["Scheduler"] = None,
+        encoder_url_registry=None,
     ):
         super().__init__(
             server_args,
@@ -1390,6 +1428,7 @@ class MMReceiverGrpc(MMReceiverBase):
             tp_rank=tp_rank,
             tp_group=tp_group,
             scheduler=scheduler,
+            encoder_url_registry=encoder_url_registry,
         )
 
     def build_and_send_encode_request(self, image_urls, rid):
@@ -1564,6 +1603,7 @@ def create_mm_receiver(
     tp_group: Optional[GroupCoordinator] = None,
     scheduler: Optional["Scheduler"] = None,
     transport_mode: Optional[str] = None,
+    encoder_url_registry=None,
 ):
     if transport_mode is None:
         transport_mode = envs.SGLANG_ENCODER_MM_RECEIVER_MODE.get()
@@ -1583,4 +1623,5 @@ def create_mm_receiver(
         tp_rank=tp_rank,
         tp_group=tp_group,
         scheduler=scheduler,
+        encoder_url_registry=encoder_url_registry,
     )
