@@ -73,7 +73,7 @@ The following tables categorize every SGLang dependency with compiled (C/C++/Rus
 | Package | cp314t Status | Notes |
 |---|---|---|
 | `ray` | ❌ No 3.14 support at all | Made optional in vLLM. SGLang already has it as optional (`[ray]`). Not blocking. |
-| `opencv-python-headless` | ❌ No | Diffusion extra only. Tracking: [opencv#27933](https://github.com/opencv/opencv-python/issues/27933). |
+| `opencv-python-headless` | ❌ No | Diffusion extra only. Tracking: [opencv/opencv#27933](https://github.com/opencv/opencv/issues/27933), build fix PR: [opencv-python#1051](https://github.com/opencv/opencv-python/pull/1051). |
 | `xformers` | ✅ Yes (≥0.0.35) | Resolved by removing CPython C API dependency. |
 
 ### SGLang-Owned Compiled Components
