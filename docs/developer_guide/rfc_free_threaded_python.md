@@ -4,7 +4,7 @@
 
 CPython 3.13 introduced an experimental free-threaded build (PEP 703) that removes the Global Interpreter Lock (GIL). CPython 3.14t is the first release where this build is stable enough for production use, and the ecosystem of packages with free-threading wheels is growing rapidly.
 
-vLLM has demonstrated ([vllm-project/vllm#18937](https://github.com/vllm-project/vllm/issues/18937)) that a large-scale CUDA-accelerated serving framework can run under a free-threaded interpreter. SGLang shares a similar dependency footprint and architecture. Enabling free-threaded support would unlock true CPU-level parallelism in the Python layer — benefiting the tokenizer manager, scheduler, HTTP server, disaggregation controller, and other asyncio + thread-pool components that today serialize behind the GIL.
+vLLM has demonstrated ([vllm-project/vllm#28762](https://github.com/vllm-project/vllm/issues/28762)) that a large-scale CUDA-accelerated serving framework can run under a free-threaded interpreter. SGLang shares a similar dependency footprint and architecture. Enabling free-threaded support would unlock true CPU-level parallelism in the Python layer — benefiting the tokenizer manager, scheduler, HTTP server, disaggregation controller, and other asyncio + thread-pool components that today serialize behind the GIL.
 
 This RFC tracks the dependency readiness, identifies the internal code changes needed, and proposes a phased plan to make `uv pip install sglang` work out of the box in a clean Python 3.14t environment on Linux x86-64 (CPU and CUDA).
 
@@ -316,7 +316,7 @@ flowchart TB
 
 ## References
 
-- [vLLM free-threaded Python tracking issue (vllm-project/vllm#18937)](https://github.com/vllm-project/vllm/issues/18937)
+- [vLLM free-threaded Python tracking issue (vllm-project/vllm#28762)](https://github.com/vllm-project/vllm/issues/28762)
 - [PEP 703 – Making the Global Interpreter Lock Optional in CPython](https://peps.python.org/pep-0703/)
 - [py-free-threading.github.io – Package tracking](https://py-free-threading.github.io/tracking/)
 - [CPython 3.14 free-threaded howto](https://docs.python.org/3.14/howto/free-threading-python.html)
