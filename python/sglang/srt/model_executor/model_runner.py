@@ -715,6 +715,11 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             register_forward_hooks(self.model, server_args.forward_hooks)
 
         if self.eagle_use_aux_hidden_state:
+            if not hasattr(self.model, "set_eagle3_layers_to_capture"):
+                raise ValueError(
+                    f"Model {self.model.__class__.__name__} does not implement set_eagle3_layers_to_capture, "
+                    "which is required for EAGLE3."
+                )
             self.model.set_eagle3_layers_to_capture(
                 self.eagle_aux_hidden_state_layer_ids
             )
@@ -2221,7 +2226,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 self.server_args.enable_torch_compile = False
 
         if self.eagle_use_aux_hidden_state:
-            self.model.set_eagle3_layers_to_capture()
+            self.model.set_eagle3_layers_to_capture(
+                self.eagle_aux_hidden_state_layer_ids
+            )
         if self.dflash_use_aux_hidden_state:
             self.model.set_dflash_layers_to_capture(self.dflash_target_layer_ids)
 
