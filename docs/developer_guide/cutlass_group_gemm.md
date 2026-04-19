@@ -451,7 +451,7 @@ def cutlass_fused_experts_fp8(
     silu_and_mul(c1, intermediate)
 
     # ========= 阶段 5：量化中间结果 =========
-    intemediate_q, a2_scale = sglang_per_token_group_quant_fp8(intermediate, 128)
+    intermediate_q, a2_scale = sglang_per_token_group_quant_fp8(intermediate, 128)
 
     # ========= 阶段 6：Group GEMM 2（down projection）=========
     # 对每个专家 i：C2[i] = intermediate_q[专家i的tokens] × w2_q[i]
@@ -618,10 +618,13 @@ __global__ void get_group_gemm_starts(
         // 正常情况：A=[tokens, k], B=[e, k, n]
         a_offsets[expert_id] = a_base + expert_offset * k;
         b_offsets[expert_id] = b_base + expert_id * k * n;
+        // Scale 偏移：FP8 使用 128 元素为一个 block 进行量化
+        // A 的 scale 是 per-token-group（每 128 个元素一个 scale）
+        // B 的 scale 是 per-block（每 128×128 个元素一个 scale）
         a_scales_offsets[expert_id] = a_scales_base + expert_offset * k / 128;
         b_scales_offsets[expert_id] = b_scales_base + expert_id * k * n / 128 / 128;
     } else {
-        // 转置情况：用于小 batch size 优化
+        // 转置情况：用于小 batch size 优化，A 和 B 的角色互换
         a_offsets[expert_id] = a_base + expert_id * k * n;
         b_offsets[expert_id] = b_base + expert_offset * k;
         a_scales_offsets[expert_id] = a_scales_base + expert_id * k * n / 128 / 128;
@@ -630,6 +633,9 @@ __global__ void get_group_gemm_starts(
     out_offsets[expert_id] = out_base + expert_offset * n;
 
     // 计算 blockscale 布局（CUTLASS 3.x 特有，用于 FP8 块量化）
+    // layout_sfa_ptr 和 layout_sfb_ptr 由函数参数 layout_sfa_base + expert_id 得到
+    LayoutSFA* layout_sfa_ptr = layout_sfa_base + expert_id;
+    LayoutSFB* layout_sfb_ptr = layout_sfb_base + expert_id;
     *layout_sfa_ptr = ScaleConfig::tile_atom_to_shape_SFA(
         cute::make_shape(m, n, k, 1));
     *layout_sfb_ptr = ScaleConfig::tile_atom_to_shape_SFB(
