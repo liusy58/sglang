@@ -13,6 +13,33 @@ set(CMAKE_VERBOSE_MAKEFILE ON CACHE BOOL "ON")
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_SHARED_LIBRARY_PREFIX "")
 
+# ---------------------------------------------------------------------------
+# Free-threaded (cp314t / Py_GIL_DISABLED) build switch.
+#
+# When ON, drop the cp310 stable-ABI restriction (pyproject.toml
+# `wheel.py-api = "cp310"`) so that Python_add_library() emits a
+# version-specific extension (`*.cpython-314t-*.so`) instead of an abi3
+# one. The stable ABI is incompatible with free-threaded interpreters.
+#
+# The pyproject `wheel.py-api` value is overridden out-of-band by setting
+# the env var SKBUILD_WHEEL_PY_API="" before invoking pip — see
+# scripts/nogil/build_deps.sh stage F.
+# ---------------------------------------------------------------------------
+option(SGL_KERNEL_NOGIL "Build sgl-kernel for free-threaded CPython (cp314t)" OFF)
+if(SGL_KERNEL_NOGIL)
+    message(STATUS "SGL_KERNEL_NOGIL=ON — disabling stable-ABI build for free-threaded Python")
+    set(SKBUILD_SABI_COMPONENT "")
+    set(SKBUILD_SABI_VERSION "")
+    add_compile_definitions(SGL_KERNEL_NOGIL=1)
+    # Empty list — Python_add_library() will not be passed USE_SABI at all.
+    set(SGL_SABI_CLAUSE "")
+else()
+    # Preserve historical behavior: emit cp310-compatible abi3 extensions
+    # when SKBUILD_SABI_VERSION is provided by scikit-build-core via the
+    # `wheel.py-api = "cp310"` setting in pyproject.toml.
+    set(SGL_SABI_CLAUSE USE_SABI ${SKBUILD_SABI_VERSION})
+endif()
+
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT} REQUIRED)
 
@@ -338,7 +365,7 @@ set(INCLUDES
 
 # =========================== Common SM90 Build ============================= #
 # Build SM90 library with fast math optimization (same namespace, different directory)
-Python_add_library(common_ops_sm90_build MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${SOURCES})
+Python_add_library(common_ops_sm90_build MODULE ${SGL_SABI_CLAUSE} WITH_SOABI ${SOURCES})
 
 target_compile_options(common_ops_sm90_build PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:${SGL_KERNEL_CUDA_FLAGS} -use_fast_math>
@@ -352,7 +379,7 @@ set_target_properties(common_ops_sm90_build PROPERTIES
 
 # =========================== Common SM100+ Build ============================= #
 # Build SM100+ library with precise math (same namespace, different directory)
-Python_add_library(common_ops_sm100_build MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${SOURCES})
+Python_add_library(common_ops_sm100_build MODULE ${SGL_SABI_CLAUSE} WITH_SOABI ${SOURCES})
 
 target_compile_options(common_ops_sm100_build PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:${SGL_KERNEL_CUDA_FLAGS}>
@@ -477,7 +504,7 @@ if (SGL_KERNEL_ENABLE_FA3)
         "${FA3_GEN_SRCS}"
     )
 
-    Python_add_library(flash_ops MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${FLASH_SOURCES})
+    Python_add_library(flash_ops MODULE ${SGL_SABI_CLAUSE} WITH_SOABI ${FLASH_SOURCES})
 
     target_compile_options(flash_ops PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${SGL_FLASH_KERNEL_CUDA_FLAGS}>)
     target_include_directories(flash_ops PRIVATE
@@ -507,7 +534,7 @@ set(SPATIAL_SOURCES
     "csrc/spatial_extension.cc"
 )
 
-Python_add_library(spatial_ops MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${SPATIAL_SOURCES})
+Python_add_library(spatial_ops MODULE ${SGL_SABI_CLAUSE} WITH_SOABI ${SPATIAL_SOURCES})
 target_compile_options(spatial_ops PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${SGL_KERNEL_CUDA_FLAGS}>)
 target_link_libraries(spatial_ops PRIVATE ${TORCH_LIBRARIES} c10 cuda)
 install(TARGETS spatial_ops LIBRARY DESTINATION sgl_kernel)
@@ -522,7 +549,7 @@ set(DEEPGEMM_SOURCES
     "${repo-deepgemm_SOURCE_DIR}/csrc/python_api.cpp"
 )
 
-Python_add_library(deep_gemm_cpp MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${DEEPGEMM_SOURCES})
+Python_add_library(deep_gemm_cpp MODULE ${SGL_SABI_CLAUSE} WITH_SOABI ${DEEPGEMM_SOURCES})
 
 # Link against necessary libraries, including nvrtc for JIT compilation.
 target_link_libraries(deep_gemm_cpp PRIVATE ${TORCH_LIBRARIES} c10 cuda nvrtc mscclpp_static)

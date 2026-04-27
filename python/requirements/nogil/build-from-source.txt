@@ -1,0 +1,162 @@
+# ---------------------------------------------------------------------------
+# build-from-source.txt — packages with NO cp314t wheel on PyPI today.
+#
+# This file is **not** consumed by `pip` directly. `scripts/nogil/build_deps.sh`
+# parses it line-by-line and installs each entry in dependency order with
+# `pip install --no-build-isolation`. The `--no-build-isolation` flag is
+# critical: if pip creates a fresh PEP 517 build env it will pull a
+# with-GIL torch into a temporary venv, which then conflicts with the
+# cp314t torch already in the target env.
+#
+# Format (one logical entry per record, blank lines / comments skipped):
+#
+#   name    : <pip-installable identifier>
+#   stage   : D | E | F             # which build_deps.sh stage owns it
+#   patch   : <relative path under patches/, optional>
+#   needs   : <comma-separated build deps, free-form>
+#   requires: <comma-separated runtime deps, free-form, mostly nvcc/sm>
+#   url     : <upstream repo or sdist URL>
+#   tracking: <upstream PR/issue tracking the cp314t fix>
+#
+# Records are separated by `---`.
+# ---------------------------------------------------------------------------
+
+# === Stage C: PyTorch stack ================================================
+# Not listed individually because they all install from the PyTorch nightly
+# index in a single command:
+#
+#   uv pip install --pre torch torchvision torchaudio torchao \
+#       --index-url https://download.pytorch.org/whl/nightly/cu124
+#
+# build_deps.sh pins the nightly date via PYTORCH_NIGHTLY_DATE so that a
+# rerun on a different day produces the same versions.
+
+# === Stage D: low-level C / Rust extensions =================================
+
+name    : soundfile==0.13.1
+stage   : D
+needs   : libsndfile1, cffi
+url     : https://pypi.org/project/soundfile/
+tracking: -
+---
+name    : pybase64
+stage   : D
+needs   : gcc>=11
+url     : https://pypi.org/project/pybase64/
+tracking: -
+---
+name    : setproctitle
+stage   : D
+needs   : gcc>=11
+url     : https://pypi.org/project/setproctitle/
+tracking: -
+---
+name    : tiktoken
+stage   : D
+needs   : rustc>=1.78, cargo
+url     : https://pypi.org/project/tiktoken/
+tracking: -
+---
+name    : uvloop
+stage   : D
+needs   : libuv1-dev, cython>=3.1
+url     : https://pypi.org/project/uvloop/
+tracking: https://github.com/MagicStack/uvloop/issues/659
+---
+name    : outlines-core
+stage   : D
+patch   : outlines-core-py314t.patch
+needs   : rustc>=1.78, cargo, maturin>=1.7
+url     : https://github.com/dottxt-ai/outlines-core
+tracking: https://github.com/dottxt-ai/outlines-core/issues/248
+---
+name    : sentencepiece
+stage   : D
+needs   : libprotobuf-dev, protobuf-compiler, cmake>=3.27
+url     : https://pypi.org/project/sentencepiece/
+tracking: -
+---
+name    : compressed-tensors
+stage   : D
+needs   : numpy, torch
+url     : https://pypi.org/project/compressed-tensors/
+tracking: -
+---
+name    : smg-grpc-servicer>=0.5.0
+stage   : D
+needs   : rustc>=1.78
+url     : https://pypi.org/project/smg-grpc-servicer/
+tracking: -
+---
+
+# === Stage E: CUDA kernels (order matters) ==================================
+
+name    : cuda-python>=12.9
+stage   : E
+needs   : cython>=3.1
+requires: nvcc>=12.4
+url     : https://github.com/NVIDIA/cuda-python
+tracking: -
+---
+name    : flashinfer-cubin==0.6.7.post2
+stage   : E
+needs   : -
+requires: nvcc>=12.4, sm>=80
+url     : https://pypi.org/project/flashinfer-cubin/
+tracking: -
+---
+name    : flashinfer-python==0.6.7.post2
+stage   : E
+needs   : flashinfer-cubin, torch>=2.9
+requires: nvcc>=12.4, sm>=80
+url     : https://github.com/flashinfer-ai/flashinfer
+tracking: https://github.com/flashinfer-ai/flashinfer/pull/1687
+---
+name    : flash-attn>=4.0.0b4
+stage   : E
+needs   : torch>=2.9, ninja, packaging
+requires: nvcc>=12.4, sm>=80
+url     : https://github.com/Dao-AILab/flash-attention
+tracking: -
+---
+name    : quack-kernels>=0.3.0
+stage   : E
+patch   : quack-kernels-py314t.patch
+needs   : torch>=2.9, ninja
+requires: nvcc>=12.4, sm>=90
+url     : https://github.com/Dao-AILab/quack
+tracking: -
+---
+name    : kernels
+stage   : E
+needs   : torch>=2.9
+requires: nvcc>=12.4
+url     : https://pypi.org/project/kernels/
+tracking: -
+---
+
+# === Stage F: SGLang-owned components =======================================
+
+name    : sgl-kernel
+stage   : F
+needs   : torch>=2.9, scikit-build-core>=0.10, cmake>=3.27, ninja
+requires: nvcc>=12.4, sm>=80
+url     : ./sgl-kernel
+tracking: -
+# Build with SGL_KERNEL_NOGIL=1 to drop the cp310 stable-ABI restriction
+# (see sgl-kernel/CMakeLists.txt) and produce a real cp314t wheel.
+---
+name    : sgl-router
+stage   : F
+needs   : rustc>=1.78, maturin>=1.7
+url     : ./sgl-model-gateway
+tracking: -
+# PyO3 module is annotated `gil_used = false`; nothing else to patch.
+---
+name    : sglang
+stage   : G
+needs   : everything above
+url     : ./python
+tracking: -
+# Installed with `pip install -e python --no-deps --no-build-isolation`
+# because Stages B–F have already resolved every transitive dependency.

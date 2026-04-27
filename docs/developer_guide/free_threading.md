@@ -1,167 +1,229 @@
-# Running SGLang on Free-Threaded (nogil) Python 3.14t
+# Running SGLang on Free-Threaded (cp314t) Python
 
-> ⚠️ **Experimental.** As of 2026-04, no major deep-learning stack ships an
-> officially supported free-threaded build. This guide describes a research
-> bring-up — not a production deployment path.
+> ⚠️ **Experimental.** Free-threaded CPython 3.14t (PEP 703) is the first
+> release where the no-GIL build is stable enough to attempt serving
+> experiments. Most of the deep-learning ecosystem still has gaps: this
+> guide describes a research bring-up — not a production deployment path.
 
-CPython 3.13 introduced an experimental free-threaded build (PEP 703) that
-removes the Global Interpreter Lock (GIL). CPython 3.14t is the first release
-where the build is stable enough to attempt serving experiments. This document
-captures the SGLang-side knobs that exist today and the procedure for bringing
-up a single-GPU text-only model (e.g. `Qwen3.5-A3B`) on `python3.14t`.
+`uv pip install sglang` cannot succeed on a clean cp314t environment
+today. A large fraction of our compiled dependencies (`torch*`,
+`sgl-kernel`, `flash-attn`, `flashinfer*`, `cuda-python`, `quack-kernels`,
+`soundfile`, `uvloop`, `setproctitle`, `pybase64`, `tiktoken`,
+`outlines-core`, `sentencepiece`, …) ship no cp314t wheels. SGLang
+therefore ships a **reproducible source-build pipeline** instead of
+relying on PyPI.
 
-## What is in the repo
+There are two ways to use it:
 
-* **`python/pyproject.nogil.toml`** — a minimum-viable dependency manifest
-  for the cp314t target. It removes every GIL-coupled / multimodal /
-  quantization / disaggregation dependency and pins only what is strictly
-  needed to run a text-only Qwen MoE model with the Triton attention
-  backend.
-* **`python/sglang/srt/utils/free_threading.py`** — runtime helpers:
-  * `is_free_threaded()` — `True` on a `cpXYt` interpreter (detected via
-    `sysconfig.get_config_var("Py_GIL_DISABLED")`).
-  * `is_nogil_mode()` — `True` on a free-threaded interpreter **or** when
-    `SGLANG_NOGIL=1` is exported. Use this to gate fall-back paths in your
-    own code.
-  * `set_uvloop_policy_if_available()` — installs uvloop's event loop
-    policy when it is safe (uvloop has no PEP 703 support today, so on
-    cp3XYt or under `SGLANG_NOGIL=1` we silently fall back to the stdlib
-    asyncio policy). This is now the only place uvloop is referenced in
-    SGLang's hot-path entry-points.
-* **`rust/sglang-grpc/src/lib.rs`** — the PyO3 module is annotated with
-  `#[pymodule(gil_used = false)]` so importing the gRPC extension on a
-  free-threaded interpreter does not re-enable the GIL.
+1. [**Quick start (Docker)**](#quick-start-docker) — pull the prebuilt
+   image and run.
+2. [**From source (Stage A → G)**](#from-source-stage-a--g) — run the
+   layered build script directly on a host with a CUDA toolkit.
 
-## Bring-up procedure
+Whichever path you pick, the four-tier validation matrix in
+`python/requirements/nogil/README.md` is what defines "done".
 
-### 1. Toolchain
+---
 
-* CUDA 12.9 toolkit (`CUDA_HOME=/usr/local/cuda-12.9`)
-* GCC/G++ ≥ 11, `ninja`, `cmake ≥ 3.26`, `patchelf`
-* NVIDIA driver compatible with the cu130 PyTorch wheel
-* `uv` (≥ 0.4)
-
-### 2. Install free-threaded CPython and create a venv
+## Quick start (Docker)
 
 ```bash
-uv python install 3.14t
-uv venv --python 3.14t .venv-nogil
-source .venv-nogil/bin/activate
-python -VV          # must mention "free-threading build"
-```
+docker pull sglang/nogil:cu124-py314t
 
-Upgrade the build chain:
+# Smoke check — should print "nogil ok" and the SGLang version.
+docker run --rm --gpus all sglang/nogil:cu124-py314t \
+  python3.14t -c 'import sys; \
+    assert not sys._is_gil_enabled(), "GIL still enabled"; \
+    import sglang; print("nogil ok,", sglang.__version__)'
 
-```bash
-uv pip install -U pip setuptools setuptools-scm wheel scikit-build-core \
-    ninja cmake "pybind11>=2.13" "cython>=3.1" "maturin>=1.7"
-```
-
-Set compile flags:
-
-```bash
-export MAX_JOBS=$(nproc)
-export TORCH_CUDA_ARCH_LIST="9.0"   # H100 example; 8.0 for A100
-```
-
-### 3. Use the nogil pyproject
-
-```bash
-cp python/pyproject.nogil.toml python/pyproject.toml.bak  # keep a backup
-cp python/pyproject.nogil.toml python/pyproject.toml      # activate
-```
-
-(Do **not** commit this swap — it is per-venv only.)
-
-### 4. Install dependencies (source builds where needed)
-
-```bash
-# numpy / scipy / pillow first — they ship cp314t wheels in 2.1+ / 1.14+ / 10.4+
-uv pip install "numpy>=2.1" scipy pillow
-
-# native extensions that almost always need a source build on cp314t
-for pkg in pyzmq orjson msgspec pybase64 sentencepiece tiktoken \
-           setproctitle watchfiles py-spy "cuda-python>=13.0"; do
-  uv pip install --no-binary "$pkg" "$pkg"
-done
-
-# torch — try the official index first, fall back to a source build
-uv pip install torch --index-url https://download.pytorch.org/whl/nightly/cu130 \
-  || echo "Build torch from source (USE_CUDA=1 USE_DISTRIBUTED=1 ...)"
-
-# triton attention backend
-uv pip install --no-binary triton "triton>=3.2"
-```
-
-Then build SGLang's own kernel package:
-
-```bash
-cd sgl-kernel
-pip install --no-build-isolation -e .
-cd ..
-```
-
-And finally SGLang itself:
-
-```bash
-uv pip install --no-build-isolation -e python/
-```
-
-### 5. Launch the server
-
-The actual launch line you would use to bring up Qwen3.5-A3B:
-
-```bash
-export CUDA_HOME=/usr/local/cuda-12.9
-export SGLANG_TORCH_PROFILER_DIR=.
-export SGLANG_NOGIL=1                     # enables fall-back paths
-
-CUDA_VISIBLE_DEVICES=2 python -X gil=0 -m sglang.launch_server \
-    --model-path /disk3/models/Qwen3.5-35B-A3B \
-    --port 8000 --tp-size 1 --mem-fraction-static 0.9 \
-    --attention-backend triton \
+# Serve a small text-only model.
+docker run --rm --gpus all -p 30000:30000 sglang/nogil:cu124-py314t \
+  -m sglang.launch_server \
+    --model Qwen/Qwen2.5-0.5B \
+    --port 30000 \
     --disable-cuda-graph \
-    --disable-radix-cache \
-    --grammar-backend none
+    --attention-backend triton
 ```
 
-In a second shell, confirm the GIL really is disabled:
+The image is rebuilt by `.github/workflows/nogil-build.yml` on every
+change to `python/requirements/nogil/**`, `scripts/nogil/**`,
+`sgl-kernel/**`, or `docker/Dockerfile.nogil`, so its contents are
+always in sync with `main`.
+
+If you need a different CUDA version or want to bake in a model:
 
 ```bash
-python -X gil=0 -c "import sys; print('gil enabled?', sys._is_gil_enabled())"
+docker build -f docker/Dockerfile.nogil \
+  --build-arg CUDA_VERSION=12.4.1 \
+  --build-arg CPYTHON_VERSION=3.14.0 \
+  -t my-sglang-nogil .
 ```
 
-If the answer is `True`, look at the SGLang stderr for the very first line
-of the form
+---
+
+## From source (Stage A → G)
+
+The pipeline lives in `scripts/nogil/build_deps.sh`. Each stage is
+self-contained and prints the upstream tracking link when it fails so you
+can debug or skip the offending dependency in isolation.
+
+### Stage A — toolchain check
+
+```bash
+# python3.14t (free-threaded)
+pyenv install 3.14.0t || ./configure --disable-gil --enable-optimizations
+
+# system tools
+sudo apt-get install -y \
+    build-essential gcc-11 g++-11 \
+    cmake ninja-build pkg-config patchelf \
+    libssl-dev libffi-dev zlib1g-dev libsndfile1-dev \
+    libuv1-dev libzmq3-dev libprotobuf-dev protobuf-compiler
+
+# rustc >= 1.78
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# nvcc >= 12.4 (CUDA toolkit)
+# follow https://developer.nvidia.com/cuda-downloads
+```
+
+Rerun `bash scripts/nogil/build_deps.sh A` until it prints `[ ok ]` for
+every component.
+
+> **If it fails:** the script names the missing tool and the apt /
+> rustup / nvidia install command. Do not skip Stage A — a missing
+> compiler causes confusing failures three stages later.
+
+### Stage B — prebuilt cp314t wheels
+
+```bash
+bash scripts/nogil/build_deps.sh B
+```
+
+Installs everything from `python/requirements/nogil/wheels-available.txt`
+in a single resolver pass: `numpy`, `scipy`, `pyzmq`, `msgspec`,
+`orjson`, `aiohttp`, `xgrammar`, `llguidance`, `xformers`, plus the build
+backends (`scikit-build-core`, `pybind11`, `maturin`, `cython`, `cffi`)
+that later stages need.
+
+> **If it fails:** PyPI no longer publishes the pinned cp314t wheel for
+> some package. Bump that line in `wheels-available.txt` and retry.
+
+### Stage C — PyTorch nightly
+
+```bash
+bash scripts/nogil/build_deps.sh C
+# or pin a date:
+PYTORCH_NIGHTLY_DATE=20260115 bash scripts/nogil/build_deps.sh C
+```
+
+Pulls `torch` / `torchvision` / `torchaudio` / `torchao` from the
+official cp314t nightly index. We do **not** build PyTorch from source
+here (it would take hours); the lock file pins the nightly date instead.
+
+> **If it fails:** the cp314t wheel for the requested date no longer
+> exists. Check
+> <https://download.pytorch.org/whl/nightly/cu124/torch/> and bump
+> `PYTORCH_NIGHTLY_DATE` to a recent listed date.
+
+### Stage D — low-level C / Rust extensions
+
+```bash
+bash scripts/nogil/build_deps.sh D
+```
+
+Builds `soundfile`, `pybase64`, `setproctitle`, `tiktoken`, `uvloop`,
+`outlines-core`, `sentencepiece`, `compressed-tensors`,
+`smg-grpc-servicer` from source. Entries that need an out-of-tree fix
+reference a patch under `python/requirements/nogil/patches/`.
+
+> **If it fails:** the script prints the upstream issue. If you need to
+> unblock yourself, comment the failing record out of
+> `build-from-source.txt` — every Stage D package is optional at runtime
+> as long as the corresponding feature isn't exercised.
+
+### Stage E — CUDA kernels
+
+```bash
+bash scripts/nogil/build_deps.sh E
+```
+
+Order matters here: `cuda-python` → `flashinfer-cubin` →
+`flashinfer-python` → `flash-attn` → `quack-kernels` → `kernels`. All
+build with `--no-build-isolation` so they reuse the cp314t torch from
+Stage C instead of pulling a with-GIL one into a temp env.
+
+> **If it fails:** verify `nvcc --version` is ≥ 12.4 and
+> `TORCH_CUDA_ARCH_LIST` covers your GPU's compute capability
+> (`8.0` for A100, `9.0` for H100).
+
+### Stage F — SGLang-owned components
+
+```bash
+bash scripts/nogil/build_deps.sh F
+```
+
+Builds `sgl-kernel` with `SGL_KERNEL_NOGIL=ON`, which drops the cp310
+stable-ABI restriction (`wheel.py-api = "cp310"` in
+`sgl-kernel/pyproject.toml`) and emits a real `*.cpython-314t-*.so`. See
+`sgl-kernel/CMakeLists.txt` for how the option flips the SABI clause off
+at every `Python_add_library()` call site.
+
+Also builds `sgl-router` (PyO3, already annotated `gil_used = false`) if
+the `sgl-model-gateway/` directory is present.
+
+> **If it fails:** the most common cause is mismatched `nvcc` ↔ `g++`
+> versions. CUDA 12.4 wants `gcc-11` or `gcc-12`, not `gcc-13`.
+
+### Stage G — install sglang
+
+```bash
+bash scripts/nogil/build_deps.sh G
+```
+
+`pip install -e python --no-deps --no-build-isolation`. The
+`--no-deps` flag is critical: by this point Stages B–F have resolved
+every transitive dependency; if we let pip resolve again it will go to
+PyPI for cp314t wheels that don't exist and undo the whole install.
+
+A successful Stage G ends with:
 
 ```
-The global interpreter lock (GIL) has been enabled to load module '<name>'
+[ ok ] sglang 0.x.y on CPython 3.14.0 free-threading build
 ```
 
-and address that extension (upgrade version, add `Py_mod_gil = Py_MOD_GIL_NOT_USED`,
-or rebuild against `pybind11 >= 2.13`).
+---
 
-## Optional dependencies
+## Validation
 
-These packages are intentionally omitted from `pyproject.nogil.toml` because
-either no cp314t wheel exists yet, or they are not needed for the text-only
-Qwen MoE bring-up target. SGLang already guards their import sites with
-`try/except` so the daemon starts cleanly when they are missing:
+The CI workflow `.github/workflows/nogil-build.yml` runs the same four
+tiers documented in `python/requirements/nogil/README.md`:
 
-`flashinfer_python`, `flashinfer_cubin`, `flash-attn-4`, `quack-kernels`,
-`torch_memory_saver`, `torchao`, `torchcodec`, `decord2`, `av`,
-`apache-tvm-ffi`, `nvidia-cutlass-dsl`, `runai-model-streamer`,
-`smg-grpc-servicer`, `kernels`, `mistral_common`, `soundfile`, `timm`,
-`xgrammar`, `outlines`, `openai-harmony`, `anthropic`, `modelscope`, `gguf`,
-`compressed-tensors`, `IPython`, `torchvision`, `torchaudio`.
+| Tier | What |
+|------|------|
+| 0 | `wheels-available.txt` resolves on a stock Ubuntu runner |
+| 1 | `build_deps.sh` Stages A–G complete inside the Docker image |
+| 2 | Server starts, `/generate` returns sane output for Qwen2.5-0.5B |
+| 3 | `sys._is_gil_enabled()` is `False` in the server process |
 
-Re-introduce them one by one once you have a clean baseline; each requires a
-source build with the toolchain set up above.
+Anything past tier 3 (full unit tests, perf benchmarks) is Phase 5 / 6
+of the RFC and intentionally **not** part of this workflow — it would
+exceed the runner timeout.
 
-## Plan B — Python 3.13t
+---
 
-If `cp314t` wheels are too sparse on your platform, the fastest fall-back is
-`cp313t`, which has been stable for a year and where the PyTorch nightly
-index already publishes free-threaded wheels. Replace `3.14t` with `3.13t`
-in step 2 above; everything else (including `pyproject.nogil.toml` after
-adjusting `requires-python`) is identical.
+## Relationship to earlier nogil work
+
+The earlier nogil patches (`python/pyproject.nogil.toml`,
+`python/sglang/srt/utils/free_threading.py`, the PyO3
+`gil_used = false` annotation, the runtime `optional_import` guards) are
+still in the tree but are **downstream** of this pipeline: they answer
+"once everything is installed, can SGLang import and run?". This file —
+together with `scripts/nogil/build_deps.sh`,
+`docker/Dockerfile.nogil`, and `python/requirements/nogil/` — answers
+the upstream question of "can it be installed at all?", which is what
+RFC Phase 1 demands.
+
+When all four validation tiers stay green for a full release cycle, we
+can close Phase 1 and start Phase 2 (the proper `Py_GIL_DISABLED` audit
+of `sgl-kernel`).

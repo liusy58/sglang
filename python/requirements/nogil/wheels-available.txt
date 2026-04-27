@@ -1,0 +1,50 @@
+# ---------------------------------------------------------------------------
+# wheels-available.txt — packages with prebuilt cp314t wheels on PyPI.
+#
+# Consumed directly by `uv pip install -r wheels-available.txt` from
+# Stage B of `scripts/nogil/build_deps.sh`. Versions are pinned to the
+# **lowest known-good** release that publishes a `cp314t` wheel; bumping
+# them is a supply-chain change that must be made explicitly.
+#
+# Anything not on this list either:
+#   * has no cp314t wheel (see build-from-source.txt), or
+#   * is pure Python (no special handling required).
+#
+# Verify with:
+#   uv pip install --dry-run -r wheels-available.txt --python python3.14t
+# ---------------------------------------------------------------------------
+
+# --- Numerics ---------------------------------------------------------------
+numpy>=2.3.0
+scipy>=1.15.0
+pillow>=11.1.0
+
+# --- Serialization / IPC ----------------------------------------------------
+pydantic>=2.10.0
+pyzmq>=26.2.0
+msgspec>=0.20.0
+orjson>=3.10.12
+
+# --- HTTP / async -----------------------------------------------------------
+aiohttp>=3.11.0
+
+# --- Structured decoding (cp314t wheels published) --------------------------
+xgrammar>=0.1.31
+llguidance>=1.6.0
+
+# --- Multi-head attention helper (CPython-API-free since 0.0.35) -----------
+xformers>=0.0.35
+
+# --- Build backends needed before any source build can run ------------------
+# Listed here so Stage B can install them in a single resolver pass. They
+# all publish cp314t wheels.
+setuptools>=75.0
+setuptools-scm>=8.0
+wheel>=0.45.0
+ninja>=1.11.1
+cmake>=3.27.0
+scikit-build-core>=0.10.0
+pybind11>=2.13.0
+cython>=3.1.0
+maturin>=1.7.0
+cffi>=1.17.0

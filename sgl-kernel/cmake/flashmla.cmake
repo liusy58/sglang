@@ -134,7 +134,7 @@ set(FlashMLA_SOURCES
     ${repo-flashmla_SOURCE_DIR}/csrc/extension/sm90/dense_fp8/flash_fwd_mla_metadata.cu
 )
 
-Python_add_library(flashmla_ops MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${FlashMLA_SOURCES})
+Python_add_library(flashmla_ops MODULE ${SGL_SABI_CLAUSE} WITH_SOABI ${FlashMLA_SOURCES})
 target_compile_options(flashmla_ops PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-std=c++20>
     $<$<COMPILE_LANGUAGE:CUDA>:-std=c++20>

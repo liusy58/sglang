@@ -5,6 +5,19 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Mirror the parent CMakeLists.txt SGL_KERNEL_NOGIL switch so that the
+# stand-alone CPU build also drops the cp310 stable-ABI restriction when
+# requested. See ../../CMakeLists.txt for the rationale.
+option(SGL_KERNEL_NOGIL "Build sgl-kernel for free-threaded CPython (cp314t)" OFF)
+if(SGL_KERNEL_NOGIL)
+    set(SKBUILD_SABI_COMPONENT "")
+    set(SKBUILD_SABI_VERSION "")
+    add_compile_definitions(SGL_KERNEL_NOGIL=1)
+    set(SGL_SABI_CLAUSE "")
+else()
+    set(SGL_SABI_CLAUSE USE_SABI ${SKBUILD_SABI_VERSION})
+endif()
+
 find_package(Python COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT} REQUIRED)
 
 execute_process(
@@ -91,7 +104,7 @@ add_compile_options(
     -fopenmp
 )
 
-Python_add_library(common_ops MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${SOURCES})
+Python_add_library(common_ops MODULE ${SGL_SABI_CLAUSE} WITH_SOABI ${SOURCES})
 target_link_libraries(common_ops PRIVATE ${TORCH_LIBRARIES} ${NUMA_LIB})
 target_include_directories(common_ops PRIVATE ${TORCH_INCLUDE_DIRS})
 

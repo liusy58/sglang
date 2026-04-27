@@ -1,0 +1,126 @@
+# ===========================================================================
+# nogil-build.yml — CI guard for the free-threaded (cp314t) source-build
+# pipeline. Runs the same `scripts/nogil/build_deps.sh` that powers
+# `docker/Dockerfile.nogil`, then performs the four-tier validation
+# described in `python/requirements/nogil/README.md`.
+#
+# Path-filtered: only triggers when something that could break the
+# pipeline changes. Phase 5 will add the full unit-test sweep — this
+# workflow stays deliberately small (build + smoke test) so it can run
+# on a single self-hosted GPU box without hour-long timeouts.
+# ===========================================================================
+name: nogil-build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'python/requirements/nogil/**'
+      - 'scripts/nogil/**'
+      - 'sgl-kernel/**'
+      - 'docker/Dockerfile.nogil'
+      - '.github/workflows/nogil-build.yml'
+  pull_request:
+    paths:
+      - 'python/requirements/nogil/**'
+      - 'scripts/nogil/**'
+      - 'sgl-kernel/**'
+      - 'docker/Dockerfile.nogil'
+      - '.github/workflows/nogil-build.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: nogil-build-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Tier 0 — `wheels-available.txt` resolves on a vanilla Ubuntu runner.
+  # No GPU needed; fastest gate so a typo in the lock file fails in <1min.
+  # -------------------------------------------------------------------------
+  resolve-wheels:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+      - name: Install Python 3.14t via uv
+        run: |
+          ~/.local/bin/uv python install 3.14t
+          ~/.local/bin/uv venv --python 3.14t .venv
+      - name: Dry-run wheels-available.txt
+        run: |
+          source .venv/bin/activate
+          ~/.local/bin/uv pip install --dry-run \
+            -r python/requirements/nogil/wheels-available.txt
+
+  # -------------------------------------------------------------------------
+  # Tier 1+2+3 — full pipeline + smoke test. Requires a GPU runner with
+  # CUDA 12.4 and ~80 GiB disk for build artifacts. Gated behind tier 0
+  # so wheel typos do not waste GPU-hours.
+  # -------------------------------------------------------------------------
+  build-and-smoke:
+    needs: resolve-wheels
+    runs-on: [self-hosted, gpu, cuda-12.4]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the nogil image
+        run: |
+          docker build \
+            -f docker/Dockerfile.nogil \
+            --build-arg CUDA_VERSION=12.4.1 \
+            --build-arg CPYTHON_VERSION=3.14.0 \
+            -t sglang-nogil:ci-${{ github.sha }} \
+            .
+
+      - name: Tier 1 — verify build_deps.sh stages completed
+        run: |
+          docker run --rm --gpus all sglang-nogil:ci-${{ github.sha }} \
+            python3.14t -c '
+          import sys, importlib
+          assert not sys._is_gil_enabled(), "GIL still enabled"
+          for mod in ["torch", "numpy", "scipy", "pyzmq", "msgspec",
+                     "orjson", "aiohttp", "sgl_kernel", "sglang"]:
+              importlib.import_module(mod.replace("-", "_"))
+          print("[ ok ] tier 1: all imports succeed under cp314t")
+          '
+
+      - name: Tier 2 — server smoke test on Qwen2.5-0.5B
+        env:
+          HF_HUB_ENABLE_HF_TRANSFER: "0"
+        run: |
+          # Launch the server in the background, hit /generate once,
+          # tear down. Using a single layer / 0.5B model keeps the
+          # smoke test under five minutes.
+          docker run -d --name sglang-smoke --gpus all -p 30000:30000 \
+            sglang-nogil:ci-${{ github.sha }} \
+            -m sglang.launch_server \
+              --model Qwen/Qwen2.5-0.5B \
+              --port 30000 \
+              --disable-cuda-graph \
+              --mem-fraction-static 0.6 \
+              --attention-backend triton
+          # Wait up to 10 minutes for /health.
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:30000/health; then break; fi
+            sleep 10
+          done
+          curl -sS http://localhost:30000/generate \
+            -H 'Content-Type: application/json' \
+            -d '{"text":"The capital of France is","sampling_params":{"max_new_tokens":4,"temperature":0}}' \
+            | tee /tmp/gen.json
+          grep -q 'Paris' /tmp/gen.json
+
+      - name: Tier 3 — assert sys._is_gil_enabled() == False inside server
+        run: |
+          docker exec sglang-smoke python3.14t -c \
+            'import sys; assert not sys._is_gil_enabled(), "GIL is on"; print("nogil ok")'
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f sglang-smoke || true
+          docker rmi sglang-nogil:ci-${{ github.sha }} || true

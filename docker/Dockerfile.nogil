@@ -1,0 +1,103 @@
+# syntax=docker/dockerfile:1.7
+# ===========================================================================
+# Dockerfile.nogil — reproducible image for SGLang on free-threaded
+# CPython 3.14t.
+#
+# A clean `uv pip install sglang` cannot succeed on cp314t today (a large
+# fraction of our compiled deps publish no cp314t wheels). This image
+# delivers an out-of-the-box environment by:
+#
+#   1. Building CPython 3.14 with --disable-gil --enable-optimizations.
+#   2. Installing the toolchain required by every Stage of build_deps.sh.
+#   3. Running scripts/nogil/build_deps.sh end-to-end.
+#
+# Suggested tag: sglang/nogil:cu124-py314t
+#
+# Build:
+#   docker build -f docker/Dockerfile.nogil \
+#       --build-arg CUDA_VERSION=12.4.1 \
+#       --build-arg CPYTHON_VERSION=3.14.0 \
+#       -t sglang/nogil:cu124-py314t .
+#
+# Smoke test:
+#   docker run --rm --gpus all sglang/nogil:cu124-py314t \
+#       python3.14t -c 'import sys; assert not sys._is_gil_enabled(); \
+#                       import sglang; print(sglang.__version__)'
+# ===========================================================================
+
+ARG CUDA_VERSION=12.4.1
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS toolchain
+
+ARG CPYTHON_VERSION=3.14.0
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ---------------------------------------------------------------------------
+# Stage 1 — system toolchain. Mirrors `build_deps.sh` Stage A requirements.
+# ---------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential gcc-11 g++-11 \
+        ca-certificates curl wget git \
+        cmake ninja-build pkg-config \
+        libssl-dev libffi-dev zlib1g-dev libbz2-dev liblzma-dev \
+        libsqlite3-dev libreadline-dev libncursesw5-dev tk-dev xz-utils \
+        libgdbm-dev libnss3-dev uuid-dev \
+        libprotobuf-dev protobuf-compiler \
+        libsndfile1 libsndfile1-dev \
+        libuv1-dev libzmq3-dev libopenblas-dev gfortran patchelf \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 100 && \
+    update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 100
+
+# Rust toolchain (Stage A: rustc>=1.78). Pin via rustup channel.
+ENV CARGO_HOME=/opt/cargo RUSTUP_HOME=/opt/rustup
+ENV PATH=/opt/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --default-toolchain 1.82.0 --profile minimal \
+    && rustc --version
+
+# ---------------------------------------------------------------------------
+# Stage 2 — build CPython 3.14t (free-threaded).
+#
+# We do NOT use pyenv to avoid pulling another build env into the image.
+# `make altinstall` so /usr/local/bin/python3.14t exists alongside the
+# system python3.
+# ---------------------------------------------------------------------------
+RUN cd /tmp && \
+    wget -q https://www.python.org/ftp/python/${CPYTHON_VERSION}/Python-${CPYTHON_VERSION}.tgz && \
+    tar -xzf Python-${CPYTHON_VERSION}.tgz && \
+    cd Python-${CPYTHON_VERSION} && \
+    ./configure --enable-optimizations --disable-gil --with-ensurepip=install \
+                --prefix=/usr/local && \
+    make -j"$(nproc)" && \
+    make altinstall && \
+    cd / && rm -rf /tmp/Python-${CPYTHON_VERSION} /tmp/Python-${CPYTHON_VERSION}.tgz && \
+    /usr/local/bin/python3.14t -VV && \
+    /usr/local/bin/python3.14t -c 'import sysconfig,sys; \
+        assert sysconfig.get_config_var("Py_GIL_DISABLED"), "GIL not disabled!"; \
+        print("python3.14t OK, free-threading confirmed")'
+
+# ---------------------------------------------------------------------------
+# Stage 3 — copy the SGLang source tree and run build_deps.sh.
+# ---------------------------------------------------------------------------
+WORKDIR /workspace/sglang
+COPY . /workspace/sglang
+
+# build_deps.sh detects PYTHON via env; we set it explicitly so the image
+# is independent of $PATH ordering.
+ENV PYTHON=/usr/local/bin/python3.14t \
+    TORCH_CUDA_ARCH_LIST="8.0;9.0" \
+    MAX_JOBS=8
+
+# Stages B–G. Stage A is already satisfied by the toolchain layer above,
+# but we run it anyway so the image build fails loudly if a future apt
+# dep gets dropped.
+RUN bash scripts/nogil/build_deps.sh A B C D E F G
+
+# Smoke check baked into the image so `docker run` never silently produces
+# a broken environment.
+RUN ${PYTHON} -c 'import sys; assert not sys._is_gil_enabled(), "GIL still on"; \
+import sglang; print("sglang", getattr(sglang, "__version__", "dev"))'
+
+ENTRYPOINT ["/usr/local/bin/python3.14t"]
+CMD ["-m", "sglang.launch_server", "--help"]
