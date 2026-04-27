@@ -34,7 +34,6 @@ from typing import Any, Awaitable, Dict, List, Optional, Tuple, Union
 import fastapi
 import pybase64
 import torch
-import uvloop
 import zmq
 import zmq.asyncio
 from fastapi import BackgroundTasks
@@ -117,7 +116,9 @@ from sglang.srt.utils.request_logger import RequestLogger
 from sglang.srt.utils.watchdog import Watchdog
 from sglang.utils import TypeBasedDispatcher, get_exception_traceback
 
-asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+from sglang.srt.utils.free_threading import set_uvloop_policy_if_available
+
+set_uvloop_policy_if_available()
 
 _REQUEST_STATE_WAIT_TIMEOUT = envs.SGLANG_REQUEST_STATE_WAIT_TIMEOUT.get()
 

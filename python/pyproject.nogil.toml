@@ -1,0 +1,170 @@
+# ---------------------------------------------------------------------------
+# Experimental pyproject.toml variant for running SGLang on a free-threaded
+# (nogil) Python 3.14t build (PEP 703).
+#
+# This file is *not* picked up automatically. To use it, copy or symlink it
+# over the main pyproject.toml inside a dedicated nogil venv:
+#
+#     uv python install 3.14t
+#     uv venv --python 3.14t .venv-nogil
+#     source .venv-nogil/bin/activate
+#     cp python/pyproject.nogil.toml python/pyproject.toml
+#     uv pip install --no-build-isolation -e python/
+#
+# The dependency set below is the *minimum* surface needed to bring up a
+# text-only Qwen MoE model (e.g. Qwen3.5-A3B) with `--attention-backend
+# triton`. All optional / GIL-coupled / multimodal / quantization /
+# disaggregation / streaming dependencies are intentionally omitted; the
+# corresponding code paths are guarded by try/except in SGLang and become
+# no-ops when the package is missing.
+#
+# When in doubt, fall back to source builds:
+#     uv pip install --no-binary <pkg> <pkg>
+#
+# See docs/developer_guide/free_threading.md for the full bring-up procedure.
+# ---------------------------------------------------------------------------
+
+[build-system]
+requires = ["setuptools>=61.0", "setuptools-scm>=8.0", "setuptools-rust>=1.10", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sglang"
+dynamic = ["version"]
+description = "SGLang on free-threaded CPython 3.14t (experimental)."
+readme = "README.md"
+# Free-threaded build tag is available from CPython 3.13t, but this profile
+# targets 3.14t which is the first release where free-threading is stable
+# enough for serving experiments.
+requires-python = ">=3.14"
+license = { file = "LICENSE" }
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.14",
+  "License :: OSI Approved :: Apache Software License",
+]
+
+# Minimum runtime dependencies for "single-GPU, TP=1, text-only, Triton
+# attention backend" bring-up. Anything not listed here is treated as
+# optional by SGLang at import time when SGLANG_NOGIL=1 is set.
+dependencies = [
+  # --- Core HTTP / IPC stack -------------------------------------------------
+  "aiohttp",
+  "fastapi",
+  "uvicorn",                # uvloop is intentionally NOT listed
+  "pydantic",
+  "python-multipart",
+  "requests",
+  "prometheus-client>=0.20.0",
+  "pyzmq>=25.1.2",          # source build: needs libzmq3-dev
+  "msgspec",
+  "orjson",
+  "pybase64",
+  "watchfiles",
+  "setproctitle",
+  "py-spy",
+  # --- Numerics -------------------------------------------------------------
+  "numpy>=2.1",             # 2.1+ ships free-threaded wheels
+  "scipy",                  # source build may need libopenblas-dev gfortran
+  "pillow",
+  "packaging",
+  "psutil",
+  # --- Tokenization / model I/O --------------------------------------------
+  "sentencepiece",          # source build: libprotobuf-dev protobuf-compiler
+  "tiktoken",
+  "transformers>=5.5.4",
+  "datasets",
+  "einops",
+  "tqdm",
+  "ninja",
+  "build",
+  "interegular",
+  "partial_json_parser",
+  # --- Torch & SGLang's own kernel package ---------------------------------
+  # No version pin so the user can install the cp314t nightly / locally
+  # built wheel without conflicts. cuda-python is required by torch CUDA
+  # graph helpers used by SGLang.
+  "torch",
+  "cuda-python>=13.0",
+  "sglang-kernel",          # build locally from sgl-kernel/ in this repo
+  # --- Grammar / structured decoding (optional but small) ------------------
+  "llguidance>=0.7.11,<0.8.0",
+]
+
+# Use the standard PyPI index by default. Users typically also want to
+# point torch at a free-threaded wheel index, e.g.:
+#   uv pip install torch --index-url https://download.pytorch.org/whl/nightly/cu130
+# but we do *not* hard-code that index here because the cp314t cu130 wheel
+# may live at a different URL by the time you read this.
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
+
+[project.optional-dependencies]
+# Triton attention backend dependencies. PyTorch normally pulls triton as a
+# transitive dep, but the free-threaded triton wheel may need to be installed
+# explicitly: `uv pip install triton --no-binary triton`.
+triton-backend = [
+  "triton>=3.2",
+]
+
+# Re-add these once their cp314t wheels (or source builds) are validated.
+# Each one is currently guarded with try/except inside SGLang so the import
+# does not block startup when missing.
+flashinfer = [
+  "flashinfer_python==0.6.8.post1",
+  "flashinfer_cubin==0.6.8.post1",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/sgl-project/sglang"
+"Bug Tracker" = "https://github.com/sgl-project/sglang/issues"
+
+[project.scripts]
+sglang = "sglang.cli.main:main"
+killall_sglang = "sglang.cli.killall:main"
+
+[tool.setuptools.package-data]
+"sglang" = [
+  "srt/**/*",
+  "jit_kernel/**/*"
+]
+
+[tool.setuptools.packages.find]
+exclude = [
+  "assets*",
+  "benchmark*",
+  "docs*",
+  "dist*",
+  "playground*",
+  "scripts*",
+  "tests*",
+]
+
+[tool.wheel]
+exclude = [
+  "assets*",
+  "benchmark*",
+  "docs*",
+  "dist*",
+  "playground*",
+  "scripts*",
+  "tests*",
+]
+
+[tool.setuptools_scm]
+root = ".."
+version_file = "sglang/_version.py"
+git_describe_command = ["python3", "python/tools/get_version_tag.py"]
+fallback_version = "0.0.0.dev0"
+
+# The Rust gRPC extension uses PyO3 0.23 which supports free-threaded Python.
+# The module itself is annotated with `gil_used = false` (see
+# rust/sglang-grpc/src/lib.rs) so importing it on cp314t does not re-enable
+# the GIL. If you do not need the gRPC entry-point on this profile, comment
+# the block below out to skip the Rust build entirely.
+[[tool.setuptools-rust.ext-modules]]
+target = "sglang.srt.grpc._core"
+path = "../rust/sglang-grpc/Cargo.toml"
+binding = "PyO3"

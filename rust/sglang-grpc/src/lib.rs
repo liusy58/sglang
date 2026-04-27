@@ -77,7 +77,14 @@ fn start_server(host: String, port: u16, runtime_handle: PyObject) -> PyResult<G
 }
 
 /// Python module exported by the Rust extension.
-#[pymodule]
+///
+/// `gil_used = false` opts this module in to PEP 703 free-threaded Python:
+/// when imported on a `cpXYt` interpreter (e.g. `python3.14t`) CPython will
+/// keep the GIL disabled instead of automatically re-enabling it. This is
+/// safe here because the module only exposes `start_server` (which spawns
+/// its own Tokio runtime) and the `GrpcServerHandle` class, neither of
+/// which relies on the GIL for thread-safety. Requires PyO3 >= 0.23.
+#[pymodule(gil_used = false)]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(start_server, m)?)?;
     m.add_class::<GrpcServerHandle>()?;

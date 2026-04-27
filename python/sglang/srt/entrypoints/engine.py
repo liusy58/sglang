@@ -45,8 +45,9 @@ from typing import (
 setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
 
 import torch
-import uvloop
 import zmq
+
+from sglang.srt.utils.free_threading import set_uvloop_policy_if_available
 
 from sglang.srt.elastic_ep.expert_backup_manager import run_expert_backup_manager
 from sglang.srt.entrypoints.engine_info_bootstrap_server import (
@@ -106,7 +107,7 @@ from sglang.srt.utils.watchdog import SubprocessWatchdog
 from sglang.version import __version__
 
 logger = logging.getLogger(__name__)
-asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+set_uvloop_policy_if_available()
 
 _is_cuda = is_cuda()
 

@@ -44,7 +44,6 @@ setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
 import numpy as np
 import requests
 import uvicorn
-import uvloop
 from fastapi import (
     Depends,
     FastAPI,
@@ -179,7 +178,9 @@ from sglang.utils import get_exception_traceback
 from sglang.version import __version__
 
 logger = logging.getLogger(__name__)
-asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+from sglang.srt.utils.free_threading import set_uvloop_policy_if_available
+
+set_uvloop_policy_if_available()
 
 # Global constants
 HEALTH_CHECK_TIMEOUT = int(os.getenv("SGLANG_HEALTH_CHECK_TIMEOUT", 20))
