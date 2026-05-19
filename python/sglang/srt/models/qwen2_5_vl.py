@@ -657,7 +657,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
         )
 
         fallback_device = next(self.visual.parameters()).device
-        pixel_values, local_item_indices = build_local_pixel_values_for_dp_encoder(
+        pixel_values, shard_indices = build_local_pixel_values_for_dp_encoder(
             items, dtype=self.visual.dtype, fallback_device=fallback_device
         )
         image_grid_thw = torch.concat([item.image_grid_thw for item in items], dim=0)
@@ -683,13 +683,6 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
         assert pixel_values.dim() == 2, pixel_values.dim()
         assert image_grid_thw.dim() == 2, image_grid_thw.dim()
         if self.use_data_parallel:
-            # Only pass local_item_indices when sharding actually dropped some
-            # features (otherwise let the helper fall back to its legacy path).
-            shard_indices = (
-                local_item_indices
-                if len(local_item_indices) < len(items)
-                else None
-            )
             return run_dp_sharded_mrope_vision_model(
                 self.visual,
                 pixel_values,

@@ -570,7 +570,7 @@ def maybe_shard_items_for_dp_encoder(
     # downstream code can still compute the global grid_thw_list and assemble
     # outputs in the original per-item order.
     for i, item in enumerate(items):
-        if i not in local_set and isinstance(item.feature, torch.Tensor):
+        if i not in local_set and item.feature is not None:
             item.feature = None
 
     return sorted(local_set)
@@ -582,14 +582,19 @@ def build_local_pixel_values_for_dp_encoder(
     dtype: torch.dtype,
     fallback_device: torch.device,
     to_device: Optional[torch.device] = None,
-) -> Tuple[torch.Tensor, List[int]]:
+) -> Tuple[torch.Tensor, Optional[List[int]]]:
     """Concat the locally-owned item features into ``pixel_values``.
 
     After :func:`maybe_shard_items_for_dp_encoder` has dropped non-local items'
     ``feature`` to ``None`` on this rank, this helper produces the
-    ``(pixel_values, local_item_indices)`` pair expected by
+    ``(pixel_values, shard_indices)`` pair expected by
     :func:`sglang.srt.multimodal.mm_utils.run_dp_sharded_mrope_vision_model`'s
     ``local_item_indices`` parameter.
+
+    The second return is ``None`` when no sharding occurred (every item still
+    has a feature locally) so callers can pass it straight through to the DP
+    helper, which will then take its legacy slice path. When sharding did
+    happen, the second return is the sorted list of locally-owned item indices.
 
     When no items are owned locally (the LB assigned this rank an empty shard),
     returns a typed ``(0, 0)`` empty tensor on ``fallback_device``. In that case
@@ -605,6 +610,8 @@ def build_local_pixel_values_for_dp_encoder(
             ``None`` the tensor stays on its current device (post-H2D).
     """
     local_item_indices = [i for i, it in enumerate(items) if it.feature is not None]
+    sharded = len(local_item_indices) < len(items)
+    shard_indices = local_item_indices if sharded else None
     local_features = [items[i].feature for i in local_item_indices]
     if local_features:
         pixel = torch.cat(local_features, dim=0)
@@ -612,10 +619,10 @@ def build_local_pixel_values_for_dp_encoder(
             pixel = pixel.to(device=to_device, dtype=dtype)
         else:
             pixel = pixel.to(dtype)
-        return pixel, local_item_indices
+        return pixel, shard_indices
     return (
         torch.empty((0, 0), dtype=dtype, device=fallback_device),
-        local_item_indices,
+        shard_indices,
     )
 
 

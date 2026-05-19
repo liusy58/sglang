@@ -1200,7 +1200,7 @@ class Qwen3VLForConditionalGeneration(nn.Module):
         )
 
         fallback_device = next(self.visual.parameters()).device
-        pixel_values, local_item_indices = build_local_pixel_values_for_dp_encoder(
+        pixel_values, shard_indices = build_local_pixel_values_for_dp_encoder(
             items, dtype=self.visual.dtype, fallback_device=fallback_device
         )
         image_grid_thw = torch.concat([item.image_grid_thw for item in items], dim=0)
@@ -1208,11 +1208,6 @@ class Qwen3VLForConditionalGeneration(nn.Module):
         assert image_grid_thw.dim() == 2, image_grid_thw.dim()
 
         if self.use_data_parallel:
-            shard_indices = (
-                local_item_indices
-                if len(local_item_indices) < len(items)
-                else None
-            )
             return run_dp_sharded_mrope_vision_model(
                 self.visual,
                 pixel_values,

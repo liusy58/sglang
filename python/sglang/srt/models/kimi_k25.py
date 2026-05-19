@@ -683,7 +683,7 @@ class KimiK25ForConditionalGeneration(nn.Module):
             build_local_pixel_values_for_dp_encoder,
         )
 
-        pixel_values, local_item_indices = build_local_pixel_values_for_dp_encoder(
+        pixel_values, shard_indices = build_local_pixel_values_for_dp_encoder(
             items,
             dtype=target_dtype,
             fallback_device=device,
@@ -694,11 +694,6 @@ class KimiK25ForConditionalGeneration(nn.Module):
         )
 
         if self.use_data_parallel:
-            shard_indices = (
-                local_item_indices
-                if len(local_item_indices) < len(items)
-                else None
-            )
             image_embeds = run_dp_sharded_mrope_vision_model(
                 self.vision_tower,
                 pixel_values,
