@@ -562,7 +562,7 @@ def run_dp_sharded_mrope_vision_model(
 
     # Consistency check: when the caller pre-sharded items, its local_item_indices
     # must match what the LB produces here (both are deterministic from the same
-    # patches_per_image, so this is a sanity assertion, not a runtime branch).
+    # patches_per_item, so this is a sanity assertion, not a runtime branch).
     if local_item_indices is not None:
         assert local_item_indices == image_idxs_local, (
             "DP-encoder pre-shard mismatch: `local_item_indices` provided by "
@@ -573,7 +573,7 @@ def run_dp_sharded_mrope_vision_model(
             "run_dp_sharded_mrope_vision_model`: "
             f"caller={local_item_indices} vs in-helper={image_idxs_local}. "
             "This indicates the two LB call sites saw different "
-            "`patches_per_image`."
+            "`patches_per_item`."
         )
         # pixel_values already contains only the local items in
         # image_idxs_local order -- skip the redundant slice/concat.
