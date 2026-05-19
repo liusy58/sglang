@@ -621,6 +621,9 @@ def build_local_pixel_values_for_dp_encoder(
             pixel = pixel.to(dtype)
         return pixel, shard_indices
     return (
+        # (0, 0) is intentional: the DP helper only reads ``shape[0]`` on the
+        # pre-shard path; the trailing dim is irrelevant because the per-rank
+        # ViT call is skipped entirely (it branches on ``shape[0] > 0``).
         torch.empty((0, 0), dtype=dtype, device=fallback_device),
         shard_indices,
     )
