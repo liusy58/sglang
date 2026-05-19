@@ -565,9 +565,15 @@ def run_dp_sharded_mrope_vision_model(
     # patches_per_image, so this is a sanity assertion, not a runtime branch).
     if local_item_indices is not None:
         assert local_item_indices == image_idxs_local, (
-            "local_item_indices from pre-sharding does not match the LB decision: "
-            f"{local_item_indices} vs {image_idxs_local}. This indicates the "
-            "caller and the DP encoder helper disagree on patches_per_image."
+            "DP-encoder pre-shard mismatch: `local_item_indices` provided by "
+            "the caller (built from "
+            "`sglang.srt.managers.mm_utils.maybe_shard_items_for_dp_encoder` + "
+            "`build_local_pixel_values_for_dp_encoder`) disagrees with the LB "
+            "decision in `sglang.srt.multimodal.mm_utils."
+            "run_dp_sharded_mrope_vision_model`: "
+            f"caller={local_item_indices} vs in-helper={image_idxs_local}. "
+            "This indicates the two LB call sites saw different "
+            "`patches_per_image`."
         )
         # pixel_values already contains only the local items in
         # image_idxs_local order -- skip the redundant slice/concat.

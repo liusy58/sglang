@@ -679,27 +679,16 @@ class KimiK25ForConditionalGeneration(nn.Module):
         target_dtype = self.vision_tower.patch_embed.proj.weight.dtype
         # Some items' feature may have been dropped to None by the DP-encoder
         # pre-H2D sharding helper; only concat what we actually own.
-        local_item_indices = [
-            i for i, item in enumerate(items) if item.feature is not None
-        ]
-        local_features = [items[i].feature for i in local_item_indices]
-        if local_features:
-            pixel_values = torch.cat(local_features, dim=0).to(
-                device=device, dtype=target_dtype
-            )
-        else:
-            ref = next(
-                (
-                    item.feature
-                    for item in items
-                    if isinstance(item.feature, torch.Tensor)
-                ),
-                None,
-            )
-            feat_dim = ref.shape[-1] if ref is not None else 0
-            pixel_values = torch.empty(
-                (0, feat_dim), dtype=target_dtype, device=device
-            )
+        from sglang.srt.managers.mm_utils import (
+            build_local_pixel_values_for_dp_encoder,
+        )
+
+        pixel_values, local_item_indices = build_local_pixel_values_for_dp_encoder(
+            items,
+            dtype=target_dtype,
+            fallback_device=device,
+            to_device=device,
+        )
         grid_thws = torch.concat([item.image_grid_thw for item in items], dim=0).to(
             device
         )

@@ -516,8 +516,13 @@ def maybe_shard_items_for_dp_encoder(
     if not items or len(items) < 2:
         return None
 
-    server_args = get_global_server_args()
-    if not getattr(server_args, "mm_enable_dp_encoder", False):
+    try:
+        server_args = get_global_server_args()
+    except Exception:
+        return None
+    if server_args is None or not getattr(
+        server_args, "mm_enable_dp_encoder", False
+    ):
         return None
 
     # Defer import to avoid a top-level circular dependency with dp_attention.
@@ -569,6 +574,49 @@ def maybe_shard_items_for_dp_encoder(
             item.feature = None
 
     return sorted(local_set)
+
+
+def build_local_pixel_values_for_dp_encoder(
+    items: List[MultimodalDataItem],
+    *,
+    dtype: torch.dtype,
+    fallback_device: torch.device,
+    to_device: Optional[torch.device] = None,
+) -> Tuple[torch.Tensor, List[int]]:
+    """Concat the locally-owned item features into ``pixel_values``.
+
+    After :func:`maybe_shard_items_for_dp_encoder` has dropped non-local items'
+    ``feature`` to ``None`` on this rank, this helper produces the
+    ``(pixel_values, local_item_indices)`` pair expected by
+    :func:`sglang.srt.multimodal.mm_utils.run_dp_sharded_mrope_vision_model`'s
+    ``local_item_indices`` parameter.
+
+    When no items are owned locally (the LB assigned this rank an empty shard),
+    returns a typed ``(0, 0)`` empty tensor on ``fallback_device``. In that case
+    only ``shape[0]`` is read downstream, so the trailing dim and device only
+    matter for type propagation through the DP helper's empty branch.
+
+    Args:
+        items: Per-modality item list as passed to ``get_image_feature``.
+        dtype: Target ViT dtype.
+        fallback_device: Device to use when this rank owns no features (must
+            match the visual model's device so the all-gather is collective-safe).
+        to_device: Optional explicit device for the concatenated tensor. When
+            ``None`` the tensor stays on its current device (post-H2D).
+    """
+    local_item_indices = [i for i, it in enumerate(items) if it.feature is not None]
+    local_features = [items[i].feature for i in local_item_indices]
+    if local_features:
+        pixel = torch.cat(local_features, dim=0)
+        if to_device is not None:
+            pixel = pixel.to(device=to_device, dtype=dtype)
+        else:
+            pixel = pixel.to(dtype)
+        return pixel, local_item_indices
+    return (
+        torch.empty((0, 0), dtype=dtype, device=fallback_device),
+        local_item_indices,
+    )
 
 
 def _get_chunked_embedding_full(
