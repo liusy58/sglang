@@ -473,7 +473,7 @@ def run_dp_sharded_vision_model(
 # Adapted from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/vision.py
 def run_dp_sharded_mrope_vision_model(
     vision_model: torch.nn.Module,
-    pixel_values_box: list,
+    pixel_values: torch.Tensor,
     grid_thw_list: list,
     *,
     rope_type: Literal["rope_3d", "rope_2d"],
@@ -485,15 +485,7 @@ def run_dp_sharded_mrope_vision_model(
 
     Args:
         vision_model (torch.nn.Module): Vision model.
-        pixel_values_box (list[torch.Tensor]): A single-element list holding
-            the full Image/Video input tensor. The function pops the tensor
-            out of the list and releases its reference as soon as the local
-            shard has been sliced, so that the full ``pixel_values`` tensor
-            can be freed before the (heavy) vision model forward runs. The
-            caller MUST drop its own reference to ``pixel_values`` before
-            calling this function (e.g. by wrapping it as ``[pixel_values]``
-            in the call site and then doing ``del pixel_values``); otherwise
-            the memory savings will not materialise.
+        pixel_values (torch.Tensor): Image/Video input tensor.
         grid_thw_list: List of grid dimensions for each image
         rope_type: Type of rope used in the vision model.
                    Different rope types have different dimension to do ViT.
@@ -517,17 +509,6 @@ def run_dp_sharded_mrope_vision_model(
         get_attention_tp_rank,
         get_attention_tp_size,
     )
-
-    # Consume the full pixel_values from the caller-provided box so that
-    # only this function holds a reference to it for the moment. Combined
-    # with the caller having dropped its own reference (see docstring),
-    # the full tensor can be freed by `del pixel_values` below before the
-    # vision model forward runs, leaving each rank with only its local
-    # shard in memory.
-    assert (
-        isinstance(pixel_values_box, list) and len(pixel_values_box) == 1
-    ), "pixel_values_box must be a single-element list containing the pixel_values tensor"
-    pixel_values = pixel_values_box.pop()
 
     tp_size = get_attention_tp_size()
     if tp_size == 1:
@@ -560,13 +541,6 @@ def run_dp_sharded_mrope_vision_model(
         cum_gpu_sample_counts[tp_rank_local] : cum_gpu_sample_counts[tp_rank_local + 1]
     ]
 
-    # Capture device / dtype / feature dim before we release the full
-    # pixel_values tensor, so the empty-rank fallback paths below can
-    # still construct an empty tensor with the correct attributes.
-    pv_device = pixel_values.device
-    pv_dtype = pixel_values.dtype
-    pv_feat_dim = pixel_values.shape[1]
-
     # Get the pixel values for the local images based on the image_idxs_local
     if len(image_idxs_local) > 0:
         pixel_values_local = torch.cat(
@@ -578,17 +552,10 @@ def run_dp_sharded_mrope_vision_model(
     else:
         # Handle case where this rank has no images
         pixel_values_local = torch.empty(
-            (0, pv_feat_dim),
-            device=pv_device,
-            dtype=pv_dtype,
+            (0, pixel_values.shape[1]),
+            device=pixel_values.device,
+            dtype=pixel_values.dtype,
         )
-
-    # The local shard has been materialised; drop the function-local
-    # reference to the full tensor so that (assuming the caller also
-    # dropped its reference per the docstring contract) the underlying
-    # storage can be reclaimed before we kick off the vision encoder.
-    del pixel_values
-
     # embed_dim_reduction_factor = 2 * 2
     if rope_type == "rope_2d":
         embed_dim_reduction_factor = (
@@ -618,8 +585,8 @@ def run_dp_sharded_mrope_vision_model(
             out_dim = getattr(vision_model.config, "hidden_size", None)
             image_embeds_local = torch.empty(
                 (0, embed_dim_reduction_factor, out_dim),
-                device=pv_device,
-                dtype=pv_dtype,
+                device=pixel_values.device,
+                dtype=pixel_values.dtype,
             )
     else:
         if pixel_values_local.shape[0] > 0:
@@ -631,8 +598,8 @@ def run_dp_sharded_mrope_vision_model(
             # Handle empty case
             image_embeds_local = torch.empty(
                 (0, vision_model.out_hidden_size),
-                device=pv_device,
-                dtype=pv_dtype,
+                device=pixel_values.device,
+                dtype=pixel_values.dtype,
             )
 
     # Pad the output based on max_len_per_rank

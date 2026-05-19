@@ -1200,16 +1200,10 @@ class Qwen3VLForConditionalGeneration(nn.Module):
         assert image_grid_thw.dim() == 2, image_grid_thw.dim()
 
         if self.use_data_parallel:
-            grid_thw_list = image_grid_thw.tolist()
-            # Release full pixel_values reference before sharding so the
-            # underlying storage can be freed inside the helper after the
-            # local shard is sliced.
-            pv_box = [pixel_values]
-            del pixel_values
             return run_dp_sharded_mrope_vision_model(
                 self.visual,
-                pv_box,
-                grid_thw_list,
+                pixel_values,
+                image_grid_thw.tolist(),
                 rope_type="rope_3d",
             )
         else:
@@ -1224,11 +1218,8 @@ class Qwen3VLForConditionalGeneration(nn.Module):
         assert pixel_values.dim() == 2, pixel_values.dim()
         assert video_grid_thw.dim() == 2, video_grid_thw.dim()
         if self.use_data_parallel:
-            grid_thw_list = video_grid_thw.tolist()
-            pv_box = [pixel_values]
-            del pixel_values
             return run_dp_sharded_mrope_vision_model(
-                self.visual, pv_box, grid_thw_list, rope_type="rope_3d"
+                self.visual, pixel_values, video_grid_thw.tolist(), rope_type="rope_3d"
             )
         else:
             video_embeds = self.visual(pixel_values, grid_thw=video_grid_thw)
