@@ -677,19 +677,45 @@ class KimiK25ForConditionalGeneration(nn.Module):
     def get_image_feature(self, items: List[MultimodalDataItem]) -> torch.Tensor:
         device = self.vision_tower.device
         target_dtype = self.vision_tower.patch_embed.proj.weight.dtype
-        pixel_values = torch.cat([item.feature for item in items], dim=0).to(
-            device=device, dtype=target_dtype
-        )
+        # Some items' feature may have been dropped to None by the DP-encoder
+        # pre-H2D sharding helper; only concat what we actually own.
+        local_item_indices = [
+            i for i, item in enumerate(items) if item.feature is not None
+        ]
+        local_features = [items[i].feature for i in local_item_indices]
+        if local_features:
+            pixel_values = torch.cat(local_features, dim=0).to(
+                device=device, dtype=target_dtype
+            )
+        else:
+            ref = next(
+                (
+                    item.feature
+                    for item in items
+                    if isinstance(item.feature, torch.Tensor)
+                ),
+                None,
+            )
+            feat_dim = ref.shape[-1] if ref is not None else 0
+            pixel_values = torch.empty(
+                (0, feat_dim), dtype=target_dtype, device=device
+            )
         grid_thws = torch.concat([item.image_grid_thw for item in items], dim=0).to(
             device
         )
 
         if self.use_data_parallel:
+            shard_indices = (
+                local_item_indices
+                if len(local_item_indices) < len(items)
+                else None
+            )
             image_embeds = run_dp_sharded_mrope_vision_model(
                 self.vision_tower,
                 pixel_values,
                 grid_thws.tolist(),
                 rope_type="rope_2d",
+                local_item_indices=shard_indices,
             )
             image_features = self.mm_projector(image_embeds)
             return image_features

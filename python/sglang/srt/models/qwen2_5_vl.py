@@ -648,10 +648,32 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
         return pattern.pad_input_tokens(input_ids, mm_inputs)
 
     def get_image_feature(self, items: List[MultimodalDataItem]) -> torch.Tensor:
-        # in qwen-vl, last dim is the same
-        pixel_values = torch.cat([item.feature for item in items], dim=0).type(
-            self.visual.dtype
-        )
+        # in qwen-vl, last dim is the same. Some items' feature may have been
+        # dropped to None by the DP-encoder pre-H2D sharding helper; in that
+        # case we only concat the locally-owned shard and pass the original
+        # item indices down so the DP helper can skip its own slicing.
+        local_item_indices = [
+            i for i, item in enumerate(items) if item.feature is not None
+        ]
+        local_features = [items[i].feature for i in local_item_indices]
+        if local_features:
+            pixel_values = torch.cat(local_features, dim=0).type(self.visual.dtype)
+        else:
+            # Rank owns no images for this batch -- build an empty placeholder
+            # with the correct trailing dim so downstream concat / pad works.
+            ref = next(
+                (
+                    item.feature
+                    for item in items
+                    if isinstance(item.feature, torch.Tensor)
+                ),
+                None,
+            )
+            feat_dim = ref.shape[-1] if ref is not None else 0
+            device = ref.device if ref is not None else torch.device("cpu")
+            pixel_values = torch.empty(
+                (0, feat_dim), dtype=self.visual.dtype, device=device
+            )
         image_grid_thw = torch.concat([item.image_grid_thw for item in items], dim=0)
 
         expected_dim = getattr(self.visual, "embed_dim", -1)
@@ -675,8 +697,19 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
         assert pixel_values.dim() == 2, pixel_values.dim()
         assert image_grid_thw.dim() == 2, image_grid_thw.dim()
         if self.use_data_parallel:
+            # Only pass local_item_indices when sharding actually dropped some
+            # features (otherwise let the helper fall back to its legacy path).
+            shard_indices = (
+                local_item_indices
+                if len(local_item_indices) < len(items)
+                else None
+            )
             return run_dp_sharded_mrope_vision_model(
-                self.visual, pixel_values, image_grid_thw.tolist(), rope_type="rope_3d"
+                self.visual,
+                pixel_values,
+                image_grid_thw.tolist(),
+                rope_type="rope_3d",
+                local_item_indices=shard_indices,
             )
         else:
             image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
