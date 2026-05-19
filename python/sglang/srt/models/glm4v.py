@@ -603,8 +603,14 @@ class Glm4vForConditionalGeneration(nn.Module):
         assert pixel_values.dim() == 2, pixel_values.dim()
         assert image_grid_thw.dim() == 2, image_grid_thw.dim()
         if self.use_data_parallel:
+            grid_thw_list = image_grid_thw.tolist()
+            # Release full pixel_values reference before sharding so the
+            # underlying storage can be freed inside the helper after the
+            # local shard is sliced.
+            pv_box = [pixel_values]
+            del pixel_values
             return run_dp_sharded_mrope_vision_model(
-                self.visual, pixel_values, image_grid_thw.tolist(), rope_type="rope_3d"
+                self.visual, pv_box, grid_thw_list, rope_type="rope_3d"
             )
         else:
             image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
@@ -629,10 +635,13 @@ class Glm4vForConditionalGeneration(nn.Module):
         assert pixel_values.dim() == 2, pixel_values.dim()
         assert video_grid_thw.dim() == 2, video_grid_thw.dim()
         if self.use_data_parallel:
+            grid_thw_list = flattened_video_grid_thw.tolist()
+            pv_box = [pixel_values]
+            del pixel_values
             return run_dp_sharded_mrope_vision_model(
                 self.visual,
-                pixel_values,
-                flattened_video_grid_thw.tolist(),
+                pv_box,
+                grid_thw_list,
                 rope_type="rope_3d",
             )
         else:

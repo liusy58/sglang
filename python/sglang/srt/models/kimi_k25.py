@@ -685,10 +685,13 @@ class KimiK25ForConditionalGeneration(nn.Module):
         )
 
         if self.use_data_parallel:
+            grid_thw_list = grid_thws.tolist()
+            pv_box = [pixel_values]
+            del pixel_values
             image_embeds = run_dp_sharded_mrope_vision_model(
                 self.vision_tower,
-                pixel_values,
-                grid_thws.tolist(),
+                pv_box,
+                grid_thw_list,
                 rope_type="rope_2d",
             )
             image_features = self.mm_projector(image_embeds)
