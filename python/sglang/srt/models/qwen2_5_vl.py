@@ -24,6 +24,7 @@
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 
 import logging
+import os
 import re
 from functools import partial
 from typing import Iterable, List, Optional, Tuple, Type
@@ -656,6 +657,16 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
             build_local_pixel_values_for_dp_encoder,
         )
 
+        _prof = (
+            os.environ.get("SGLANG_DP_ENCODER_PROFILE", "0") == "1"
+            and torch.cuda.is_available()
+        )
+        if _prof:
+            ev_a = torch.cuda.Event(enable_timing=True)
+            ev_b = torch.cuda.Event(enable_timing=True)
+            ev_c = torch.cuda.Event(enable_timing=True)
+            ev_a.record()
+
         fallback_device = next(self.visual.parameters()).device
         pixel_values, shard_indices = build_local_pixel_values_for_dp_encoder(
             items, dtype=self.visual.dtype, fallback_device=fallback_device
@@ -682,8 +693,10 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
 
         assert pixel_values.dim() == 2, pixel_values.dim()
         assert image_grid_thw.dim() == 2, image_grid_thw.dim()
+        if _prof:
+            ev_b.record()
         if self.use_data_parallel:
-            return run_dp_sharded_mrope_vision_model(
+            image_embeds = run_dp_sharded_mrope_vision_model(
                 self.visual,
                 pixel_values,
                 image_grid_thw.tolist(),
@@ -692,6 +705,22 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
             )
         else:
             image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
+        if _prof:
+            ev_c.record()
+            torch.cuda.synchronize()
+            t_prep = ev_a.elapsed_time(ev_b)
+            t_vit = ev_b.elapsed_time(ev_c)
+            t_total = ev_a.elapsed_time(ev_c)
+            logger.warning(
+                "[GET_IMAGE_FEATURE dp=%s] items=%d total=%.3fms prep=%.3f vit_or_dp=%.3f "
+                "grid_thw=%s",
+                self.use_data_parallel,
+                len(items),
+                t_total,
+                t_prep,
+                t_vit,
+                image_grid_thw.tolist(),
+            )
         return image_embeds
 
     _lora_pattern = re.compile(

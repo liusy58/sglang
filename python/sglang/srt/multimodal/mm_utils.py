@@ -30,10 +30,15 @@ LLaVA-Onevision : https://arxiv.org/pdf/2408.03326
 
 import ast
 import itertools
+import logging
 import math
+import os
 import re
 from io import BytesIO
 from typing import Literal, Optional
+
+_DP_ENC_PROFILE = os.environ.get("SGLANG_DP_ENCODER_PROFILE", "0") == "1"
+_dp_enc_logger = logging.getLogger("sglang.dp_encoder_profile")
 
 import numpy as np
 import pybase64
@@ -525,6 +530,18 @@ def run_dp_sharded_mrope_vision_model(
     if tp_size == 1:
         return vision_model(pixel_values, grid_thw=torch.tensor(grid_thw_list))
 
+    # ---- profiling setup (gated by SGLANG_DP_ENCODER_PROFILE=1) ----
+    _prof = _DP_ENC_PROFILE and pixel_values.is_cuda
+    if _prof:
+        ev_start = torch.cuda.Event(enable_timing=True)
+        ev_prep_done = torch.cuda.Event(enable_timing=True)
+        ev_vit_done = torch.cuda.Event(enable_timing=True)
+        ev_pad_done = torch.cuda.Event(enable_timing=True)
+        ev_gather_done = torch.cuda.Event(enable_timing=True)
+        ev_reasm_done = torch.cuda.Event(enable_timing=True)
+        ev_start.record()
+    # ----------------------------------------------------------------
+
     # GPU_0 tp_rank_local = 0
     # GPU_1 tp_rank_local = 1
     tp_rank_local = get_attention_tp_rank()
@@ -612,6 +629,9 @@ def run_dp_sharded_mrope_vision_model(
     max_len_per_rank = max(grouped_pixel_values_len) // embed_dim_reduction_factor
     local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
 
+    if _prof:
+        ev_prep_done.record()
+
     # Run the vision model on the local pixel_values_local
     if rope_type == "rope_2d":
         if pixel_values_local.shape[0] > 0:
@@ -643,6 +663,8 @@ def run_dp_sharded_mrope_vision_model(
 
     # Pad the output based on max_len_per_rank
     # for tensor_model_parallel_all_gather to work
+    if _prof:
+        ev_vit_done.record()
     current_len = image_embeds_local.shape[0]
     if current_len < max_len_per_rank:
         padding_size = max_len_per_rank - current_len
@@ -667,9 +689,13 @@ def run_dp_sharded_mrope_vision_model(
         image_embeds_local_padded = image_embeds_local
 
     # Do all_gather to collect embeddings from all ranks
+    if _prof:
+        ev_pad_done.record()
     gathered_embeds = get_attention_tp_group().all_gather(
         image_embeds_local_padded, dim=0
     )
+    if _prof:
+        ev_gather_done.record()
 
     # Remove padding and reconstruct per-rank embeddings
     rank_embeddings = list[torch.Tensor]()
@@ -703,4 +729,31 @@ def run_dp_sharded_mrope_vision_model(
                 ]
                 embed_start += img_patches
     out_embeddings = torch.cat(original_order_embeddings, dim=0)
+    if _prof:
+        ev_reasm_done.record()
+        torch.cuda.synchronize()
+        t_prep = ev_start.elapsed_time(ev_prep_done)
+        t_vit = ev_prep_done.elapsed_time(ev_vit_done)
+        t_pad = ev_vit_done.elapsed_time(ev_pad_done)
+        t_gather = ev_pad_done.elapsed_time(ev_gather_done)
+        t_reasm = ev_gather_done.elapsed_time(ev_reasm_done)
+        t_total = ev_start.elapsed_time(ev_reasm_done)
+        _dp_enc_logger.warning(
+            "[DP-ENC rank=%d tp=%d] images=%d local=%d patches_per_image=%s "
+            "grouped_len=%s max_len_per_rank=%d | total=%.3fms "
+            "prep=%.3f vit=%.3f pad=%.3f gather=%.3f reasm=%.3f",
+            tp_rank_local,
+            tp_size,
+            len(grid_thw_list),
+            len(image_idxs_local),
+            patches_per_image,
+            grouped_pixel_values_len,
+            max_len_per_rank,
+            t_total,
+            t_prep,
+            t_vit,
+            t_pad,
+            t_gather,
+            t_reasm,
+        )
     return out_embeddings
