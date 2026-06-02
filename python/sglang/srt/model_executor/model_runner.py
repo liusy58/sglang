@@ -657,6 +657,20 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         )
         # Load the model
         self.sampler = create_sampler()
+
+        # Start DeepGEMM parallel precompilation before model loading
+        self._deep_gemm_precompile_thread = None
+        if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM:
+            from sglang.srt.layers.deep_gemm_wrapper.compile_utils import (
+                start_deep_gemm_precompile,
+            )
+
+            self._deep_gemm_precompile_thread = start_deep_gemm_precompile(
+                model_config=self.model_config,
+                tp_size=self.tp_size,
+                ep_size=self.moe_ep_size,
+            )
+
         self.load_model()
         self._prepare_moe_topk()
 
@@ -804,6 +818,12 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                     host_to_device_ratio=hisparse_cfg.host_to_device_ratio,
                 )
             self.init_attention_backend()
+            # Wait for DeepGEMM parallel precompilation to finish before kernel warmup
+            if self._deep_gemm_precompile_thread is not None:
+                logger.info("Waiting for DeepGEMM parallel precompilation to finish...")
+                self._deep_gemm_precompile_thread.join()
+                logger.info("DeepGEMM parallel precompilation finished.")
+                self._deep_gemm_precompile_thread = None
             self.kernel_warmup()
             self._pre_initialize_flashinfer_allreduce_workspace()
             self.init_device_graphs()

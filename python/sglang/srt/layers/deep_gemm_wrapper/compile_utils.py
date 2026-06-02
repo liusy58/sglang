@@ -1,9 +1,10 @@
 import logging
 import os
+import threading
 import time
 from contextlib import contextmanager, nullcontext
 from enum import IntEnum, auto
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from tqdm import tqdm
@@ -512,3 +513,181 @@ def pp_parallel_deep_gemm_warmup(model_runner) -> None:
         time.perf_counter() - t0,
         model_runner.pp_rank,
     )
+
+
+def _derive_deep_gemm_shapes(model_config, tp_size: int, ep_size: int) -> List[Tuple[DeepGemmKernelType, int, int, int]]:
+    """Derive all DeepGEMM (kernel_type, N, K, num_groups) tuples from model config.
+
+    This enables pre-compilation of kernels in parallel with model loading.
+    """
+    shapes = []
+    hf_config = model_config.hf_text_config
+
+    hidden_size = getattr(hf_config, "hidden_size", None)
+    if hidden_size is None:
+        return shapes
+
+    # MoE shapes
+    moe_intermediate_size = getattr(hf_config, "moe_intermediate_size", None)
+    n_routed_experts = getattr(hf_config, "n_routed_experts", None)
+
+    if moe_intermediate_size is not None and n_routed_experts is not None:
+        # Number of experts per EP shard
+        num_experts_per_ep = n_routed_experts // ep_size
+
+        # gate_up_proj (w13): N = moe_intermediate_size * 2, K = hidden_size
+        gate_up_n = moe_intermediate_size * 2
+        # down_proj (w2): N = hidden_size, K = moe_intermediate_size
+        down_n = hidden_size
+
+        # Contiguous layout kernels
+        shapes.append((
+            DeepGemmKernelType.GROUPED_GEMM_NT_F8F8BF16_CONTIG,
+            gate_up_n, hidden_size, num_experts_per_ep,
+        ))
+        shapes.append((
+            DeepGemmKernelType.GROUPED_GEMM_NT_F8F8BF16_CONTIG,
+            down_n, moe_intermediate_size, num_experts_per_ep,
+        ))
+
+        # Masked layout kernels
+        shapes.append((
+            DeepGemmKernelType.GROUPED_GEMM_NT_F8F8BF16_MASKED,
+            gate_up_n, hidden_size, num_experts_per_ep,
+        ))
+        shapes.append((
+            DeepGemmKernelType.GROUPED_GEMM_NT_F8F8BF16_MASKED,
+            down_n, moe_intermediate_size, num_experts_per_ep,
+        ))
+
+    # Dense MLP shapes (for shared experts or non-MoE layers)
+    intermediate_size = getattr(hf_config, "intermediate_size", None)
+    if intermediate_size is not None:
+        # gate_up_proj: N = intermediate_size * 2 / tp_size, K = hidden_size
+        dense_gate_up_n = (intermediate_size * 2) // tp_size
+        # down_proj: N = hidden_size, K = intermediate_size / tp_size
+        dense_down_k = intermediate_size // tp_size
+
+        shapes.append((
+            DeepGemmKernelType.GEMM_NT_F8F8BF16,
+            dense_gate_up_n, hidden_size, 1,
+        ))
+        shapes.append((
+            DeepGemmKernelType.GEMM_NT_F8F8BF16,
+            hidden_size, dense_down_k, 1,
+        ))
+
+    # Shared expert MLP shapes (for MoE models with shared experts)
+    n_shared_experts = getattr(hf_config, "n_shared_experts", None)
+    if n_shared_experts is not None and moe_intermediate_size is not None:
+        shared_intermediate = moe_intermediate_size * n_shared_experts
+        shared_gate_up_n = (shared_intermediate * 2) // tp_size
+        shared_down_k = shared_intermediate // tp_size
+
+        shapes.append((
+            DeepGemmKernelType.GEMM_NT_F8F8BF16,
+            shared_gate_up_n, hidden_size, 1,
+        ))
+        shapes.append((
+            DeepGemmKernelType.GEMM_NT_F8F8BF16,
+            hidden_size, shared_down_k, 1,
+        ))
+
+    # MLA attention BMM shapes (DeepSeek-V2/V3 style)
+    from sglang.srt.configs.model_config import AttentionArch
+
+    if model_config.attention_arch == AttentionArch.MLA:
+        kv_lora_rank = getattr(hf_config, "kv_lora_rank", None)
+        qk_nope_head_dim = getattr(hf_config, "qk_nope_head_dim", None)
+        v_head_dim = getattr(hf_config, "v_head_dim", None)
+        num_attention_heads = getattr(hf_config, "num_attention_heads", None)
+
+        if (
+            kv_lora_rank is not None
+            and qk_nope_head_dim is not None
+            and num_attention_heads is not None
+        ):
+            num_local_heads = num_attention_heads // tp_size
+
+            # w_kc: grouped_gemm(q_nope, w_kc) -> N=kv_lora_rank, K=qk_nope_head_dim
+            shapes.append((
+                DeepGemmKernelType.GROUPED_GEMM_NT_F8F8BF16_MASKED,
+                kv_lora_rank, qk_nope_head_dim, num_local_heads,
+            ))
+
+            # w_vc: grouped_gemm(attn_output, w_vc) -> N=v_head_dim, K=kv_lora_rank
+            if v_head_dim is not None:
+                shapes.append((
+                    DeepGemmKernelType.GROUPED_GEMM_NT_F8F8BF16_MASKED,
+                    v_head_dim, kv_lora_rank, num_local_heads,
+                ))
+
+    # Deduplicate
+    return list(set(shapes))
+
+
+def start_deep_gemm_precompile(
+    model_config, tp_size: int, ep_size: int
+) -> Optional[threading.Thread]:
+    """Start DeepGEMM kernel precompilation in a background thread.
+
+    This function derives all required GEMM shapes from the model config and
+    compiles them in a background thread. The compilation is CPU-bound (NVCC/NVRTC JIT)
+    and can run in parallel with GPU model loading.
+
+    Args:
+        model_config: The model configuration object.
+        tp_size: Tensor parallelism size.
+        ep_size: Expert parallelism size.
+
+    Returns:
+        A threading.Thread that is already started, or None if precompilation
+        is not applicable.
+    """
+    if not ENABLE_JIT_DEEPGEMM:
+        return None
+    if not _ENABLE_JIT_DEEPGEMM_PRECOMPILE:
+        return None
+    if not _DO_COMPILE_ALL:
+        return None
+    if not envs.SGLANG_DEEPGEMM_PARALLEL_COMPILE.get():
+        return None
+
+    shapes = _derive_deep_gemm_shapes(model_config, tp_size, ep_size)
+    if not shapes:
+        return None
+
+    logger.info(
+        f"Starting DeepGEMM parallel precompilation for {len(shapes)} kernel shapes "
+        f"in background thread."
+    )
+
+    def _precompile_worker():
+        global _INITIALIZATION_DICT
+        for kernel_type, n, k, num_groups in shapes:
+            query_key = (kernel_type, n, k, num_groups)
+            if _INITIALIZATION_DICT.get(query_key) is not None:
+                continue
+            _INITIALIZATION_DICT[query_key] = True
+
+            logger.info(
+                f"[Parallel Precompile] DeepGEMM JIT Compiling for "
+                f"<{kernel_type.name}> N={n}, K={k}, num_groups={num_groups} with all Ms."
+            )
+            try:
+                _compile_deep_gemm_one_type_all(
+                    kernel_type=kernel_type,
+                    n=n,
+                    k=k,
+                    num_groups=num_groups,
+                    m_list=_BUILTIN_M_LIST,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[Parallel Precompile] Failed to compile "
+                    f"<{kernel_type.name}> N={n}, K={k}, num_groups={num_groups}: {e}"
+                )
+
+    thread = threading.Thread(target=_precompile_worker, daemon=True)
+    thread.start()
+    return thread
