@@ -821,8 +821,14 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             # Wait for DeepGEMM parallel precompilation to finish before kernel warmup
             if self._deep_gemm_precompile_thread is not None:
                 logger.info("Waiting for DeepGEMM parallel precompilation to finish...")
-                self._deep_gemm_precompile_thread.join()
-                logger.info("DeepGEMM parallel precompilation finished.")
+                self._deep_gemm_precompile_thread.join(timeout=1800)
+                if self._deep_gemm_precompile_thread.is_alive():
+                    logger.warning(
+                        "DeepGEMM parallel precompilation timed out after 1800s. "
+                        "Continuing with on-demand compilation."
+                    )
+                else:
+                    logger.info("DeepGEMM parallel precompilation finished.")
                 self._deep_gemm_precompile_thread = None
             self.kernel_warmup()
             self._pre_initialize_flashinfer_allreduce_workspace()
