@@ -103,8 +103,15 @@ class SGLangEncoderServer(SGLangEncoderServicer):
                 embedding_dim,
                 error_msg,
                 error_code,
-            ) = await self.encoder.encode_request(request_dict, Modality.IMAGE)
+            ) = await self.encoder.encode(
+                mm_items=request_dict["mm_items"],
+                modality=Modality.IMAGE,
+                req_id=request_dict["req_id"],
+                num_parts=request_dict["num_parts"],
+                part_idx=request_dict["part_idx"],
+            )
             if error_msg is not None:
+                await self.encoder.release_request(request.req_id)
                 context.set_code(grpc.StatusCode.INTERNAL)
                 context.set_details(error_msg)
                 return sglang_encoder_pb2.EncodeResponse()
@@ -131,7 +138,7 @@ class SGLangEncoderServer(SGLangEncoderServicer):
                             )
                         )
                     await asyncio.gather(*tasks)
-                    self.encoder.discard_embedding(request.req_id)
+                    await self.encoder.release_request(request.req_id)
                 return sglang_encoder_pb2.EncodeResponse()
             elif self.server_args.encoder_transfer_backend == "zmq_to_tokenizer":
                 embedding_port = (
@@ -142,7 +149,7 @@ class SGLangEncoderServer(SGLangEncoderServicer):
                     prefill_host=request.prefill_host,
                     embedding_port=embedding_port,
                 )
-                self.encoder.discard_embedding(request.req_id)
+                await self.encoder.release_request(request.req_id)
                 return sglang_encoder_pb2.EncodeResponse()
 
             return sglang_encoder_pb2.EncodeResponse()
@@ -150,6 +157,7 @@ class SGLangEncoderServer(SGLangEncoderServicer):
         except Exception as e:
             logger.error(f"Encode error: {e}")
             traceback.print_exc()
+            await self.encoder.release_request(request.req_id)
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return sglang_encoder_pb2.EncodeResponse()
@@ -167,12 +175,13 @@ class SGLangEncoderServer(SGLangEncoderServicer):
                     request.buffer_address if request.buffer_address else None
                 ),
             )
-            self.encoder.discard_embedding(request.req_id)
+            await self.encoder.release_request(request.req_id)
             return sglang_encoder_pb2.SendResponse()
 
         except Exception as e:
             logger.error(f"Send error: {e}")
             traceback.print_exc()
+            await self.encoder.release_request(request.req_id)
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return sglang_encoder_pb2.SendResponse()
