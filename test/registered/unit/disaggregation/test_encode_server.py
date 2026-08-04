@@ -150,28 +150,48 @@ class TestEncoderDelivery(CustomTestCase):
             encoder.server_args = SimpleNamespace(
                 encoder_transfer_backend="zmq_to_tokenizer"
             )
-            state = encoder._begin_encode("req")
+            first_state = encoder._begin_encode("req-0")
+            second_state = encoder._begin_encode("req-1")
             ctx = SimpleNamespace(
-                req_id="req",
+                req_id="req-0",
                 modality=Modality.IMAGE,
-                items_per_req=[2],
+                items_per_req=[1, 2],
                 preprocess_result=SimpleNamespace(
-                    token_counts=[2, 3],
-                    grid_thw=[[1, 2, 3], [1, 2, 3]],
+                    token_counts=[2, 3, 4],
+                    grid_thw=[[1, 2, 3], [1, 4, 5], [1, 6, 7]],
                 ),
             )
-            requests = [{"req_id": "req", "num_parts": 2, "part_idx": 1}]
+            requests = [
+                {"req_id": "req-0", "num_parts": 2, "part_idx": 0},
+                {"req_id": "req-1", "num_parts": 2, "part_idx": 1},
+            ]
 
             publish = AsyncMock()
             with patch.object(meta_registry, "publish", publish):
                 await encoder._publish_preprocess_metadata(ctx, requests)
 
-            self.assertIs(encoder.req_states["req"], state)
-            self.assertEqual(state.embedding_data.shape, [5, 8])
-            self.assertEqual(state.embedding_data.dtype, torch.float16)
-            self.assertFalse(state.embedding_ready.is_set())
-            publish.assert_awaited_once_with("req", 80, 5, 8)
-            await encoder._finish_encode(state)
+            self.assertIs(encoder.req_states["req-0"], first_state)
+            self.assertIs(encoder.req_states["req-1"], second_state)
+            self.assertEqual(first_state.embedding_data.shape, [2, 8])
+            self.assertEqual(second_state.embedding_data.shape, [7, 8])
+            self.assertEqual(first_state.embedding_data.grid_dim, [[1, 2, 3]])
+            self.assertEqual(
+                second_state.embedding_data.grid_dim,
+                [[1, 4, 5], [1, 6, 7]],
+            )
+            self.assertEqual(first_state.embedding_data.dtype, torch.float16)
+            self.assertEqual(second_state.embedding_data.dtype, torch.float16)
+            self.assertFalse(first_state.embedding_ready.is_set())
+            self.assertFalse(second_state.embedding_ready.is_set())
+            self.assertEqual(
+                publish.await_args_list,
+                [
+                    unittest.mock.call("req-0", 32, 2, 8),
+                    unittest.mock.call("req-1", 112, 7, 8),
+                ],
+            )
+            await encoder._finish_encode(first_state)
+            await encoder._finish_encode(second_state)
 
         asyncio.run(run())
 

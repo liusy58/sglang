@@ -490,11 +490,44 @@ async def handle_scheduler_receive_meta_data(request: dict):
 
 @app.post("/scheduler_receive_url")
 async def handle_scheduler_receive_url_request(request: dict):
+    if dp_dispatcher is not None:
+        try:
+            result = await dp_dispatcher.dispatch_register_destinations(request)
+        except MMError as e:
+            return ORJSONResponse(
+                status_code=int(e.code),
+                content={
+                    "status": "error",
+                    "message": str(e),
+                    "req_id": request["req_id"],
+                },
+            )
+        if result.get("_error"):
+            return ORJSONResponse(
+                status_code=result.get("_error_code")
+                or int(HTTPStatus.INTERNAL_SERVER_ERROR),
+                content={
+                    "status": "error",
+                    "message": result["_error"],
+                    "req_id": request["req_id"],
+                },
+            )
+        return ORJSONResponse(content=None)
+    if encoder is None:
+        return ORJSONResponse(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            content={
+                "status": "error",
+                "message": "encoder not ready",
+                "req_id": request["req_id"],
+            },
+        )
     await encoder.register_embedding_destinations(
         request["req_id"],
         request["receive_count"],
         [request["receive_url"]],
     )
+    return ORJSONResponse(content=None)
 
 
 @app.get("/health")
