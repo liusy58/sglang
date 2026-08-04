@@ -48,9 +48,9 @@ from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
 from sglang.srt.mem_cache.multimodal_cache import EmbeddingResult, MultiModalStaticCache
 from sglang.srt.model_loader import get_model
 from sglang.srt.observability.metrics_collector import EncoderMetricsCollector
+from sglang.srt.runtime_context import get_disagg, get_exec, get_mm, publish
 from sglang.srt.server_args import (
     ServerArgs,
-    set_global_server_args_for_scheduler,
 )
 from sglang.srt.utils.network import (
     NetworkAddress,
@@ -325,7 +325,7 @@ class MMEncoder:
     ):
         logger.info(f"init MMEncoder {rank}/{server_args.tp_size}")
         self.server_args = server_args
-        set_global_server_args_for_scheduler(server_args)
+        publish(server_args, role="encoder")
         self.rank = rank
         # DP rank for metric labels; overridden by encoder_runtime.run_dp_worker.
         # 0 in the single-instance (non-DP) path.
@@ -403,7 +403,7 @@ class MMEncoder:
             [], dtype=self._embedding_dtype
         ).element_size()
 
-        if self.server_args.enable_mm_global_cache:
+        if get_mm().enable_mm_global_cache:
             from sglang.srt.mem_cache.embedding_cache_controller import (
                 EmbeddingCacheController,
             )
@@ -427,10 +427,10 @@ class MMEncoder:
 
         if self.rank == 0:
             logger.info(
-                f"Using transfer backend: {self.server_args.encoder_transfer_backend}"
+                f"Using transfer backend: {get_disagg().encoder_transfer_backend}"
             )
 
-            if self.server_args.encoder_transfer_backend == "mooncake":
+            if get_disagg().encoder_transfer_backend == "mooncake":
                 self.local_ip = get_local_ip_auto()
 
                 self.engine = get_mooncake_transfer_engine()
@@ -443,8 +443,8 @@ class MMEncoder:
                         hostname=self.local_ip,
                         gpu_id=self.gpu_id,
                         ib_device=(
-                            self.server_args.disaggregation_ib_device
-                            or self.server_args.mooncake_ib_device
+                            get_disagg().disaggregation_ib_device
+                            or get_exec().moe.mooncake_ib_device
                         ),
                     )
 
@@ -452,7 +452,7 @@ class MMEncoder:
             # Need to ensure the NCCL launch order on rank0 matches the dispatch order rank>0
             self.encode_dispatch_lock = asyncio.Lock()
 
-            if self.server_args.encoder_transfer_backend == "mooncake":
+            if get_disagg().encoder_transfer_backend == "mooncake":
                 # Embeddings live here, so dropping metadata must drop them too.
                 meta_registry.on_release = self.discard_embedding
                 meta_registry.sweep_timeout = self.send_timeout
@@ -1077,7 +1077,7 @@ class MMEncoder:
             # The prefix cache hashes the whole request; a fused multi-request
             # batch has no per-request key, so only N=1 contexts use it.
             use_mm_cache = (
-                self.server_args.enable_prefix_mm_cache
+                get_mm().enable_prefix_mm_cache
                 and not ctx.is_health_check
                 and not keep_on_gpu
                 and len(ctx.items_per_req) == 1
@@ -1203,7 +1203,7 @@ class MMEncoder:
         embedding_port=None,
         url=None,
     ):
-        if self.server_args.encoder_transfer_backend == "mooncake":
+        if get_disagg().encoder_transfer_backend == "mooncake":
             # Encode is synchronous, so mm_data was staged before /encode returned.
             req_id = mm_data.req_id
             if embedding is None:
@@ -1260,7 +1260,7 @@ class MMEncoder:
         logger.info(f"{endpoint = }")
 
         # Serialize data
-        if self.server_args.encoder_transfer_backend == "mooncake":
+        if get_disagg().encoder_transfer_backend == "mooncake":
             # Mooncake already pushed the embedding via RDMA;
             new_mm_data = mm_data.copy_without_embedding()
             serialized_data = pickle.dumps(new_mm_data)
@@ -1292,11 +1292,11 @@ class MMEncoder:
         await asyncio.get_event_loop().run_in_executor(self.executor, send_with_socket)
         if (
             encoder_metrics_collector is not None
-            and self.server_args.encoder_transfer_backend != "mooncake"
+            and get_disagg().encoder_transfer_backend != "mooncake"
         ):
             encoder_metrics_collector.observe_transfer(
                 time.perf_counter() - _zmq_xfer_start,
-                backend=self.server_args.encoder_transfer_backend,
+                backend=get_disagg().encoder_transfer_backend,
             )
 
     def _register_shared_mr(self, mm_data: EmbeddingData, embedding: torch.Tensor):
