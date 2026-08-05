@@ -15,9 +15,11 @@ from sglang.srt.disaggregation.encode_server import (
     MooncakeDelivery,
     ReqState,
     SendDestination,
-    ZmqSchedulerDelivery,
-    ZmqTokenizerDelivery,
+    ZmqDelivery,
     meta_registry,
+    rid_to_cond,
+    rid_to_receive_count,
+    rid_to_receive_endpoint,
 )
 from sglang.srt.disaggregation.encoder_preprocessor import EncoderPreprocessor
 from sglang.srt.disaggregation.encoder_runtime import execute_encode_pipeline
@@ -128,16 +130,36 @@ class TestEncoderPreprocessorKimiGrid(CustomTestCase):
 
 
 class TestEncoderDelivery(CustomTestCase):
-    def test_contract_has_three_direct_implementations(self):
+    def test_contract_has_two_direct_implementations(self):
         self.assertEqual(EncoderDelivery.__abstractmethods__, {"send", "release"})
         self.assertEqual(
             set(EncoderDelivery.__subclasses__()),
             {
                 MooncakeDelivery,
-                ZmqSchedulerDelivery,
-                ZmqTokenizerDelivery,
+                ZmqDelivery,
             },
         )
+
+    def test_zmq_delivery_cleanup_is_configurable(self):
+        async def run():
+            req_id = "test-zmq-delivery-cleanup"
+            rid_to_receive_endpoint[req_id] = {"127.0.0.1:1"}
+            rid_to_receive_count[req_id] = 1
+            rid_to_cond[req_id] = asyncio.Condition()
+            state = ReqState(req_id)
+            encoder = SimpleNamespace()
+
+            await ZmqDelivery(encoder, cleanup_receive_state=False).release(state)
+            self.assertIn(req_id, rid_to_receive_endpoint)
+            self.assertIn(req_id, rid_to_receive_count)
+            self.assertIn(req_id, rid_to_cond)
+
+            await ZmqDelivery(encoder, cleanup_receive_state=True).release(state)
+            self.assertNotIn(req_id, rid_to_receive_endpoint)
+            self.assertNotIn(req_id, rid_to_receive_count)
+            self.assertNotIn(req_id, rid_to_cond)
+
+        asyncio.run(run())
 
     def test_preprocess_metadata_precedes_embedding(self):
         async def run():
@@ -147,11 +169,8 @@ class TestEncoderDelivery(CustomTestCase):
             encoder._embedding_dims = {Modality.IMAGE: 8}
             encoder._embedding_dtype = torch.float16
             encoder._element_size = 2
-            encoder.server_args = SimpleNamespace(
-                encoder_transfer_backend="zmq_to_tokenizer"
-            )
-            first_state = encoder._begin_encode("req-0")
-            second_state = encoder._begin_encode("req-1")
+            first_state = encoder._acquire_encode_ref("req-0")
+            second_state = encoder._acquire_encode_ref("req-1")
             ctx = SimpleNamespace(
                 req_id="req-0",
                 modality=Modality.IMAGE,
@@ -190,8 +209,8 @@ class TestEncoderDelivery(CustomTestCase):
                     unittest.mock.call("req-1", 112, 7, 8),
                 ],
             )
-            await encoder._finish_encode(first_state)
-            await encoder._finish_encode(second_state)
+            await encoder._release_encode_ref(first_state)
+            await encoder._release_encode_ref(second_state)
 
         asyncio.run(run())
 
@@ -245,7 +264,7 @@ class TestEncoderDelivery(CustomTestCase):
             encoder.req_states = {}
             encoder.delivery = SimpleNamespace(release=AsyncMock())
 
-            state = encoder._begin_encode("req")
+            state = encoder._acquire_encode_ref("req")
             state.embedding_data = EmbeddingData(
                 "req",
                 1,
@@ -274,7 +293,7 @@ class TestEncoderDelivery(CustomTestCase):
                         embedding=embedding,
                     )
                 )
-                await encoder._finish_encode(state)
+                await encoder._release_encode_ref(state)
 
             encoder.delivery.release.assert_awaited_once_with(state)
             discard.assert_awaited_once_with("req")
@@ -325,9 +344,7 @@ class TestEncoderDelivery(CustomTestCase):
             events = []
             finish_encode = asyncio.Event()
             encoder = MMEncoder.__new__(MMEncoder)
-            encoder.server_args = SimpleNamespace(
-                encoder_transfer_backend="zmq_to_tokenizer"
-            )
+            encoder.transfer_backend = "zmq_to_tokenizer"
 
             async def encode(**kwargs):
                 events.append("metadata_published")
@@ -380,7 +397,7 @@ class TestEncoderDelivery(CustomTestCase):
             encoder = MMEncoder.__new__(MMEncoder)
             encoder.rank = 0
             encoder.req_states = {}
-            state = encoder._begin_encode("req")
+            state = encoder._acquire_encode_ref("req")
             state.embedding_data = EmbeddingData(
                 "req",
                 1,
@@ -418,7 +435,7 @@ class TestEncoderDelivery(CustomTestCase):
                 )
             )
             await send_task
-            await encoder._finish_encode(state)
+            await encoder._release_encode_ref(state)
 
             with patch.object(meta_registry, "discard", AsyncMock()):
                 await encoder.release_request("req")

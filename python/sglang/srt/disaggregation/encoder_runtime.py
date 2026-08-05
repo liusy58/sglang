@@ -517,9 +517,7 @@ class DPDispatcher:
     async def dispatch_register_destinations(self, request: dict) -> dict:
         """Route a scheduler receive URL to the DP worker owning ``req_id``."""
         req_id = request["req_id"]
-        deadline = time.monotonic() + min(
-            5.0, encode_server_module.ENCODER_REQ_TIMEOUT
-        )
+        deadline = time.monotonic() + min(5.0, encode_server_module.ENCODER_REQ_TIMEOUT)
         async with self._mapping_condition:
             while req_id not in self.req_id_to_rank:
                 remaining = deadline - time.monotonic()
@@ -860,7 +858,7 @@ async def _push_embedding_to_prefill(
 ) -> None:
     """Deliver a staged ZMQ result and release it after the send completes."""
     req_id = request["req_id"]
-    backend = enc.server_args.encoder_transfer_backend
+    backend = enc.transfer_backend
 
     if backend == "mooncake":
         return
@@ -934,7 +932,7 @@ async def execute_encode_pipeline(
     modality_str = modality.name.lower()
     time_stats.modality = modality_str
     time_stats.set_metrics_collector(encode_server_module.encoder_metrics_collector)
-    backend = enc.server_args.encoder_transfer_backend
+    backend = enc.transfer_backend
 
     if encode_server_module.encoder_metrics_collector is not None:
         encode_server_module.encoder_metrics_collector.inc_requests_received(
