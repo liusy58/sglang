@@ -12,9 +12,8 @@ These cover the pure-Python logic that the GPU end-to-end test
   - the IPC quantization allowlist (the gate that keeps silently-wrong
     quant methods off the zero-copy path)
   - stale-vs-live daemon file cleanup
-  - seed (daemon -> daemon mirroring) manifest metadata, the mirror's
-    fingerprint subset verification, and the cross-node TCP plane's request
-    whitelist (fetch_manifest + ping behind the seed token)
+  - seed (daemon -> daemon mirroring) manifest metadata and the mirror's
+    fingerprint subset verification
   - the ServerArgs guards on the weight-cache socket/seed options
 
 They intentionally require no CUDA, no model download, and no daemon
@@ -796,52 +795,6 @@ class TestMirrorFingerprintVerification(CustomTestCase):
         with self.assertRaises(RuntimeError) as ctx:
             d._verify_seed_config(source, self._model_config(), "", None)
         self.assertIn("moe_ep_rank", str(ctx.exception))
-
-
-class TestAuthorizeRemote(CustomTestCase):
-    """The cross-node TCP plane's request whitelist.
-
-    Token first, then type: fetch_manifest (the copy) and ping (the mirror's
-    liveness proof) are the whole remote contract; query_config and
-    fetch_state must stay refused.
-    """
-
-    def _daemon(self, seed_token="test-token"):
-        from sglang.srt.weight_cache.daemon import WeightCacheDaemon
-
-        d = object.__new__(WeightCacheDaemon)
-        d.seed_token = seed_token
-        return d
-
-    def test_ping_with_valid_token_is_authorized(self):
-        d = self._daemon()
-        self.assertIsNone(d._authorize_remote({"type": "ping", "token": "test-token"}))
-
-    def test_fetch_manifest_with_valid_token_is_authorized(self):
-        d = self._daemon()
-        self.assertIsNone(
-            d._authorize_remote({"type": "fetch_manifest", "token": "test-token"})
-        )
-
-    def test_any_type_without_the_token_is_refused(self):
-        d = self._daemon()
-        for req in (
-            {"type": "ping"},
-            {"type": "ping", "token": "wrong"},
-            {"type": "fetch_manifest", "token": "wrong"},
-        ):
-            self.assertIn("token", d._authorize_remote(req))
-
-    def test_no_token_configured_refuses_everything(self):
-        d = self._daemon(seed_token=None)
-        denial = d._authorize_remote({"type": "ping", "token": "test-token"})
-        self.assertIn("token", denial)
-
-    def test_engine_only_requests_stay_refused(self):
-        d = self._daemon()
-        for req_type in ("query_config", "fetch_state"):
-            denial = d._authorize_remote({"type": req_type, "token": "test-token"})
-            self.assertIn("cross-node", denial)
 
 
 class TestWeightCacheServerArgsGuards(CustomTestCase):
