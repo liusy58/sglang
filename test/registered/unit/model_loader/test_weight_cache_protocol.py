@@ -12,8 +12,10 @@ These cover the pure-Python logic that the GPU end-to-end test
   - the IPC quantization allowlist (the gate that keeps silently-wrong
     quant methods off the zero-copy path)
   - stale-vs-live daemon file cleanup
-  - seed (daemon -> daemon mirroring) manifest metadata and the mirror's
-    fingerprint subset verification
+  - seed (daemon -> daemon mirroring) manifest metadata, the mirror's
+    fingerprint subset verification, and the mirror's source-liveness check
+    across the copy (os.kill on-node, control-plane ping cross-node, plus the
+    TCP plane's request whitelist that admits ping)
   - the ServerArgs guards on the weight-cache socket/seed options
 
 They intentionally require no CUDA, no model download, and no daemon
@@ -795,6 +797,159 @@ class TestMirrorFingerprintVerification(CustomTestCase):
         with self.assertRaises(RuntimeError) as ctx:
             d._verify_seed_config(source, self._model_config(), "", None)
         self.assertIn("moe_ep_rank", str(ctx.exception))
+
+
+class TestAssertSeedAlive(CustomTestCase):
+    """The liveness proof a mirror needs across the copy, split by where the
+    source lives.
+
+    Node-local seed (Unix-socket address): same PID namespace, so
+    os.kill(pid, 0). Cross-node seed (host:port): the reported PID names
+    nothing here (a container would hide even a same-node one), so liveness
+    is a ping over the seed control plane. The remote branch is what lets
+    RDMA mirroring between two machines work at all: os.kill on the *remote*
+    PID raises ProcessLookupError on any healthy setup, which used to kill
+    the mirror right after its successful fetch_manifest handshake, before
+    the copy could start.
+    """
+
+    WHEN = "after the copy completed"
+
+    def _daemon(self, seed_addr, seed_token="test-token"):
+        from sglang.srt.weight_cache.daemon import WeightCacheDaemon
+
+        # Bypass __init__ as in TestMirrorFingerprintVerification: the probe
+        # only reads the attributes set here.
+        d = object.__new__(WeightCacheDaemon)
+        d.gpu_id = 0
+        d.seed_addr = seed_addr
+        d.seed_token = seed_token
+        return d
+
+    def _tcp_daemon_with_peer(self, seed_token="test-token"):
+        """A remote-address daemon whose control-plane connect yields one end
+        of a socketpair; the returned peer end plays the source daemon."""
+        d = self._daemon("10.20.30.40:9123", seed_token)
+        client, peer = socket.socketpair()
+        client.settimeout(5)
+        peer.settimeout(5)
+        d._connect_seed = mock.Mock(return_value=client)
+        return d, peer
+
+    # Node-local branch: process-existence check.
+
+    def test_local_live_pid_passes(self):
+        d = self._daemon("/tmp/seed.sock")
+        with mock.patch("os.kill") as kill:
+            d._assert_seed_alive(1234, when=self.WHEN)
+        kill.assert_called_once_with(1234, 0)
+
+    def test_local_gone_pid_refuses_to_serve(self):
+        d = self._daemon("/tmp/seed.sock")
+        with mock.patch("os.kill", side_effect=ProcessLookupError):
+            with self.assertRaises(RuntimeError) as ctx:
+                d._assert_seed_alive(1234, when=self.WHEN)
+        self.assertIn("Refusing to serve", str(ctx.exception))
+        self.assertIn(self.WHEN, str(ctx.exception))
+
+    def test_local_pid_owned_by_another_user_counts_as_alive(self):
+        d = self._daemon("/tmp/seed.sock")
+        with mock.patch("os.kill", side_effect=PermissionError):
+            d._assert_seed_alive(1234, when=self.WHEN)  # must not raise
+
+    def test_missing_pid_warns_but_does_not_block(self):
+        d = self._daemon("/tmp/seed.sock")
+        with self.assertLogs("sglang.srt.weight_cache.daemon", level="WARNING"):
+            d._assert_seed_alive(None, when=self.WHEN)
+            d._assert_seed_alive(0, when=self.WHEN)
+
+    # Cross-node branch: control-plane ping.
+
+    def test_remote_ping_ok_passes_and_never_touches_the_pid(self):
+        d, peer = self._tcp_daemon_with_peer()
+        # Pre-load the reply: send_msg buffers the request and recv_msg finds
+        # this already waiting, so no responder thread is needed.
+        send_msg(peer, {"status": "ok"})
+        with mock.patch("os.kill") as kill:
+            # 4242 deliberately exists nowhere: before the fix this PID went
+            # straight to os.kill and ProcessLookupError'd on every healthy
+            # two-machine mirror.
+            d._assert_seed_alive(4242, when=self.WHEN)
+        kill.assert_not_called()
+        self.assertEqual(recv_msg(peer), {"type": "ping", "token": "test-token"})
+        peer.close()
+
+    def test_remote_connect_failure_refuses_to_serve(self):
+        d = self._daemon("10.20.30.40:9123")
+        d._connect_seed = mock.Mock(
+            side_effect=RuntimeError("failed to connect to seed daemon")
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            d._assert_seed_alive(4242, when=self.WHEN)
+        self.assertIn("ping", str(ctx.exception))
+        self.assertIn("Refusing to serve", str(ctx.exception))
+        self.assertIsNotNone(ctx.exception.__cause__)
+
+    def test_remote_dropped_exchange_refuses_to_serve(self):
+        d, peer = self._tcp_daemon_with_peer()
+        peer.close()  # source gone mid-copy: what we read may be freed memory
+        with self.assertRaises(RuntimeError) as ctx:
+            d._assert_seed_alive(4242, when=self.WHEN)
+        self.assertIn("Refusing to serve", str(ctx.exception))
+
+    def test_remote_non_ok_reply_refuses_to_serve(self):
+        d, peer = self._tcp_daemon_with_peer()
+        send_msg(peer, {"status": "error", "message": "shutting down"})
+        with self.assertRaises(RuntimeError) as ctx:
+            d._assert_seed_alive(4242, when=self.WHEN)
+        self.assertIn("Refusing to serve", str(ctx.exception))
+        peer.close()
+
+
+class TestAuthorizeRemote(CustomTestCase):
+    """The cross-node TCP plane's request whitelist.
+
+    Token first, then type: fetch_manifest (the copy) and ping (the mirror's
+    liveness proof) are the whole remote contract; query_config and
+    fetch_state must stay refused.
+    """
+
+    def _daemon(self, seed_token="test-token"):
+        from sglang.srt.weight_cache.daemon import WeightCacheDaemon
+
+        d = object.__new__(WeightCacheDaemon)
+        d.seed_token = seed_token
+        return d
+
+    def test_ping_with_valid_token_is_authorized(self):
+        d = self._daemon()
+        self.assertIsNone(d._authorize_remote({"type": "ping", "token": "test-token"}))
+
+    def test_fetch_manifest_with_valid_token_is_authorized(self):
+        d = self._daemon()
+        self.assertIsNone(
+            d._authorize_remote({"type": "fetch_manifest", "token": "test-token"})
+        )
+
+    def test_any_type_without_the_token_is_refused(self):
+        d = self._daemon()
+        for req in (
+            {"type": "ping"},
+            {"type": "ping", "token": "wrong"},
+            {"type": "fetch_manifest", "token": "wrong"},
+        ):
+            self.assertIn("token", d._authorize_remote(req))
+
+    def test_no_token_configured_refuses_everything(self):
+        d = self._daemon(seed_token=None)
+        denial = d._authorize_remote({"type": "ping", "token": "test-token"})
+        self.assertIn("token", denial)
+
+    def test_engine_only_requests_stay_refused(self):
+        d = self._daemon()
+        for req_type in ("query_config", "fetch_state"):
+            denial = d._authorize_remote({"type": req_type, "token": "test-token"})
+            self.assertIn("cross-node", denial)
 
 
 class TestWeightCacheServerArgsGuards(CustomTestCase):

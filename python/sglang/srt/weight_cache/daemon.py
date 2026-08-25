@@ -665,12 +665,24 @@ class WeightCacheDaemon:
             )
 
     def _assert_seed_alive(self, seed_pid: Optional[int], *, when: str) -> None:
-        """The source process must exist for its memory to be readable.
+        """The source must stay alive for its memory to be readable.
 
         Deliberately NOT the engine client's watchdog: that one SIGKILLs itself
         when the daemon dies because it *maps* the daemon's memory forever. A
         mirror only needs the source alive until the copy retires.
+
+        Which mechanism proves liveness follows the same address-form split as
+        _connect_seed: a path-like seed address is a node-local daemon sharing
+        our PID namespace, so os.kill(pid, 0) settles it. A host:port seed can
+        be on another node (or in a container with its own PID namespace),
+        where the reported PID names nothing here -- os.kill on it would
+        *always* raise ProcessLookupError, killing a healthy cross-node mirror
+        right after its successful fetch_manifest handshake. Such a source is
+        probed over its control plane instead.
         """
+        if self._seed_is_tcp():
+            self._ping_seed(when=when)
+            return
         if not seed_pid or seed_pid <= 0:
             logger.warning(
                 "[WeightCacheDaemon gpu=%s] seed daemon at %s reported no PID; "
@@ -691,6 +703,46 @@ class WeightCacheDaemon:
             )
         except PermissionError:
             pass  # exists, owned by another user
+
+    def _seed_is_tcp(self) -> bool:
+        """True when --weight-cache-seed names host:port, False for a Unix
+        socket path. Same address-form split as _connect_seed."""
+        return not (self.seed_addr.startswith("/") or self.seed_addr.startswith("./"))
+
+    def _ping_seed(self, *, when: str) -> None:
+        """Probe a TCP seed's liveness over its control plane.
+
+        os.kill cannot see a cross-node (or containerized) PID, so the only
+        trustworthy signal is the daemon still answering. The ping rides a
+        fresh connection because _load_from_seed closed its own after
+        fetch_manifest; connect failure, a dropped exchange or a non-ok reply
+        all mean the bytes we read may be garbage.
+        """
+        request: Dict[str, Any] = {"type": "ping"}
+        if self.seed_token:
+            request["token"] = self.seed_token
+        try:
+            conn = self._connect_seed()
+            try:
+                send_msg(conn, request)
+                response = recv_msg(conn)
+            finally:
+                conn.close()
+        except Exception as e:
+            raise RuntimeError(
+                f"[WeightCacheDaemon gpu={self.gpu_id}] seed daemon at "
+                f"{self.seed_addr} did not answer a control-plane ping {when} "
+                f"({e}). Its weight memory may have been freed, so the bytes "
+                f"we read cannot be trusted. Refusing to serve them."
+            ) from e
+        if response.get("status") != "ok":
+            raise RuntimeError(
+                f"[WeightCacheDaemon gpu={self.gpu_id}] seed daemon at "
+                f"{self.seed_addr} rejected a control-plane ping {when}: "
+                f"{response.get('message', response)}. Its weight memory may "
+                f"have been freed, so the bytes we read cannot be trusted. "
+                f"Refusing to serve them."
+            )
 
     @staticmethod
     def _assert_ipc_compatible_allocator() -> None:
@@ -888,13 +940,14 @@ class WeightCacheDaemon:
             presented, self.seed_token
         ):
             return "invalid or missing seed token"
-        if req.get("type") != "fetch_manifest":
+        if req.get("type") not in ("fetch_manifest", "ping"):
             # CUDA IPC handles are meaningful only within a node, and
-            # query_config leaks the model layout; the remote plane exists purely
-            # so another node can mirror our weights.
+            # query_config leaks the model layout; the remote plane exists so
+            # another node can mirror our weights and prove we stayed alive
+            # through its copy (the mirror os.kill's nothing cross-node).
             return (
                 f"request type {req.get('type')!r} is not served over the "
-                f"cross-node control plane; only fetch_manifest is"
+                f"cross-node control plane; only fetch_manifest and ping are"
             )
         return None
 
@@ -1016,8 +1069,10 @@ class WeightCacheDaemon:
                 {
                     "status": "ok",
                     "config": self.config.to_dict(),
-                    # The mirror checks this PID stayed alive across the copy:
-                    # our memory has to exist for the whole transfer.
+                    # A node-local mirror checks this PID stayed alive across
+                    # the copy: our memory has to exist for the whole transfer.
+                    # A cross-node mirror cannot see our PID and pings the
+                    # control plane instead; the field stays for both.
                     "pid": os.getpid(),
                     "manifest": self._manifest,
                     "seed": seed_meta,
